@@ -605,11 +605,9 @@ if not df_picks_filtered.empty:
             (df_filtered_by_time['Relative Differential'].abs() >= min_relative_differential) &
             (df_filtered_by_time['Confidence Score'].abs() >= min_confidence_score)
         ].copy()
-    elif not df_filtered_by_time.empty:
+    else:
          st.warning("Required columns for filtering ('Relative Differential' or 'Confidence Score') not found in the data after time filtering.")
-         df_filtered_by_time_and_thresholds = df_filtered_by_time.copy() # Keep time-filtered data if other columns are missing
-else:
-    st.info("No data available to filter.")
+         df_filtered_by_time_and_thresholds = pd.DataFrame() # Set to empty DataFrame if columns are missing
 
 
 # Display data if available after filtering
