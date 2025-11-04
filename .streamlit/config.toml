@@ -1,7 +1,7 @@
 [theme]
-primaryColor="#00FF7F"  # Spring Green (often associated with money)
-backgroundColor="#1F2C3D" # Dark blue-grey background
-secondaryBackgroundColor="#2C3E50" # Another dark shade
+primaryColor="#32CD32"  # Lime Green (bolder)
+backgroundColor="#1A232F" # Slightly darker background
+secondaryBackgroundColor="#37474F" # Darker blue-grey
 textColor="#FFFFFF" # White text for contrast
 font="sans serif"
 
