@@ -531,19 +531,11 @@ default_time_window = 1
 decision_logic_options = ['All Picks', 'Lean Sharp / Monitor Confidence', 'Verified Sharp Play Confidence']
 default_decision_logic_index = decision_logic_options.index('Verified Sharp Play Confidence') # Index for 'Verified Sharp Play Confidence'
 
-# Initialize filter values in session state if not already present, or reset if needed
-if 'reset_filters_flag' not in st.session_state:
-    st.session_state['reset_filters_flag'] = False
-
-if st.session_state['reset_filters_flag']:
+# Initialize filter values in session state if not already present
+if 'current_time_window' not in st.session_state:
     st.session_state['current_time_window'] = default_time_window
+if 'current_decision_logic_index' not in st.session_state:
     st.session_state['current_decision_logic_index'] = default_decision_logic_index
-    st.session_state['reset_filters_flag'] = False # Reset the flag
-else:
-    if 'current_time_window' not in st.session_state:
-        st.session_state['current_time_window'] = default_time_window
-    if 'current_decision_logic_index' not in st.session_state:
-        st.session_state['current_decision_logic_index'] = default_decision_logic_index
 
 
 # Add time window input to the sidebar
@@ -555,8 +547,8 @@ time_window_hours = st.sidebar.number_input(
     step=1,
     key='time_window_input' # Keep the key
 )
-# Note: We don't need to explicitly update st.session_state['current_time_window'] here,
-# as Streamlit automatically updates session state for widgets with a key.
+# Update session state when the input widget value changes
+st.session_state['current_time_window'] = time_window_hours
 
 
 # Add decision logic filter
@@ -566,14 +558,8 @@ selected_decision_logic_filter = st.sidebar.selectbox(
     index=st.session_state['current_decision_logic_index'],
     key='selected_decision_logic_filter' # Keep the key
 )
-# Note: We don't need to explicitly update st.session_state['current_decision_logic_index'] here,
-# as Streamlit automatically updates session state for widgets with a key.
-
-
-# Add a reset button for filters
-if st.sidebar.button("Reset Filters"):
-    st.session_state['reset_filters_flag'] = True
-    st.rerun()
+# Update session state when the selectbox value changes
+st.session_state['current_decision_logic_index'] = decision_logic_options.index(selected_decision_logic_filter)
 
 
 # Add a state variable to trigger refresh
@@ -581,7 +567,7 @@ if 'refresh_data' not in st.session_state:
     st.session_state['refresh_data'] = False
 
 # Check if refresh button in sidebar is clicked
-if st.sidebar.button("Refresh Data (Sidebar)"):
+if st.sidebar.button("Refresh Data"):
     st.session_state['refresh_data'] = True
 
 
