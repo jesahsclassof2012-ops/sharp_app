@@ -7,7 +7,7 @@ import pandas as pd
 from datetime import datetime, timezone
 import pytz
 
-# Set page config to change sidebar menu icon/text
+# Set page config
 st.set_page_config(
     page_title="Sports Betting Consensus Picks",
     layout="wide",
@@ -16,8 +16,7 @@ st.set_page_config(
         'Report a bug': "https://github.com/streamlit/streamlit/issues",
         'About': "# This is a header. This is an *extremely* cool app!"
     },
-    initial_sidebar_state="expanded",
-    menu_icon="Sports" # Change the menu icon/text here
+    initial_sidebar_state="expanded"
 )
 
 
@@ -481,11 +480,9 @@ if 'refresh_data' not in st.session_state:
 if st.sidebar.button("Refresh Data (Sidebar)"):
     st.session_state['refresh_data'] = True
 
-# Check if refresh button at the bottom is clicked
-main_page_refresh_button = st.button("Refresh Data")
 
-# Fetch data when the sport changes or the refresh state is True or main page button is clicked
-if selected_sport and (st.session_state['refresh_data'] or 'df_picks' not in st.session_state or st.session_state['current_sport'] != selected_sport or main_page_refresh_button):
+# Fetch data when the sport changes or the refresh state is True
+if selected_sport and (st.session_state['refresh_data'] or 'df_picks' not in st.session_state or st.session_state['current_sport'] != selected_sport):
     with st.spinner(f"Refreshing data for {selected_sport}..."):
         df_picks = fetch_and_process_data(selected_sport)
         st.session_state['df_picks'] = df_picks
@@ -532,3 +529,9 @@ if selected_sport and (st.session_state['refresh_data'] or 'df_picks' not in st.
             st.write("No Sharp Money picks found with Verified Sharp Play confidence.")
     else:
         st.write(f"No data found for {selected_sport} meeting the criteria.")
+
+# Check if refresh button at the bottom is clicked - moved to the end
+main_page_refresh_button = st.button("Refresh Data")
+if main_page_refresh_button:
+    st.session_state['refresh_data'] = True
+    st.rerun() # Use st.rerun() to trigger a rerun of the app to fetch new data
