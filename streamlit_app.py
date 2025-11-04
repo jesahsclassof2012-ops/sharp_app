@@ -459,12 +459,25 @@ st.title("Sports Betting Consensus Picks")
 sports = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
 selected_sport = st.sidebar.selectbox("Select a Sport", sports)
 
-# Fetch data when the sport changes or the refresh button is clicked
-if selected_sport:
-    if st.sidebar.button("Refresh Data") or 'df_picks' not in st.session_state or st.session_state['current_sport'] != selected_sport:
+# Add a state variable to trigger refresh
+if 'refresh_data' not in st.session_state:
+    st.session_state['refresh_data'] = False
+
+# Check if refresh button in sidebar is clicked
+if st.sidebar.button("Refresh Data"):
+    st.session_state['refresh_data'] = True
+
+# Check if refresh button at the bottom is clicked
+if st.button("Refresh Data"):
+    st.session_state['refresh_data'] = True
+
+# Fetch data when the sport changes or the refresh state is True
+if selected_sport and (st.session_state['refresh_data'] or 'df_picks' not in st.session_state or st.session_state['current_sport'] != selected_sport):
+    with st.spinner(f"Refreshing data for {selected_sport}..."):
         df_picks = fetch_and_process_data(selected_sport)
         st.session_state['df_picks'] = df_picks
         st.session_state['current_sport'] = selected_sport
+        st.session_state['refresh_data'] = False # Reset refresh state
 
     # Display data if available in session state
     if 'df_picks' in st.session_state and not st.session_state['df_picks'].empty:
