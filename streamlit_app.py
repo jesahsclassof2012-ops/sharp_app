@@ -541,7 +541,7 @@ time_window_hours = st.sidebar.number_input(
 selected_decision_logic_filter = st.sidebar.selectbox(
     "Filter by Decision Logic:",
     ['All Picks', 'Lean Sharp / Monitor Confidence', 'Verified Sharp Play Confidence'],
-    index=0 # 'All Picks' as default
+    index=2 # 'Verified Sharp Play Confidence' as default
 )
 
 
@@ -609,7 +609,7 @@ else:
 
 # Display data if available after filtering
 if not df_filtered_by_time_and_thresholds.empty:
-    st.subheader(f"{selected_decision_logic_filter} for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria")
+    st.subheader(f"{selected_decision_logic_filter} for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours")
     st.dataframe(df_filtered_by_time_and_thresholds.style.hide(axis='index'))
 
     # Only display separate categories if 'All Picks' is selected for Decision Logic
