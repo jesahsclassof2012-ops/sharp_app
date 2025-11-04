@@ -528,16 +528,22 @@ selected_sport = st.sidebar.selectbox("Select a Sport", sports)
 
 # Define default values for filters
 default_time_window = 1
-default_decision_logic_index = 2 # Index for 'Verified Sharp Play Confidence'
+decision_logic_options = ['All Picks', 'Lean Sharp / Monitor Confidence', 'Verified Sharp Play Confidence']
+default_decision_logic_index = decision_logic_options.index('Verified Sharp Play Confidence') # Index for 'Verified Sharp Play Confidence'
 
 # Initialize filter values in session state if not already present, or reset if needed
-if 'reset_filters' not in st.session_state:
-    st.session_state['reset_filters'] = False
-if 'current_time_window' not in st.session_state or st.session_state['reset_filters']:
+if 'reset_filters_flag' not in st.session_state:
+    st.session_state['reset_filters_flag'] = False
+
+if st.session_state['reset_filters_flag']:
     st.session_state['current_time_window'] = default_time_window
-if 'current_decision_logic_index' not in st.session_state or st.session_state['reset_filters']:
     st.session_state['current_decision_logic_index'] = default_decision_logic_index
-    st.session_state['reset_filters'] = False # Reset the flag
+    st.session_state['reset_filters_flag'] = False # Reset the flag
+else:
+    if 'current_time_window' not in st.session_state:
+        st.session_state['current_time_window'] = default_time_window
+    if 'current_decision_logic_index' not in st.session_state:
+        st.session_state['current_decision_logic_index'] = default_decision_logic_index
 
 
 # Add time window input to the sidebar
@@ -553,7 +559,6 @@ st.session_state['current_time_window'] = time_window_hours # Update session sta
 
 
 # Add decision logic filter
-decision_logic_options = ['All Picks', 'Lean Sharp / Monitor Confidence', 'Verified Sharp Play Confidence']
 selected_decision_logic_filter = st.sidebar.selectbox(
     "Filter by Decision Logic:",
     decision_logic_options,
@@ -565,7 +570,7 @@ st.session_state['current_decision_logic_index'] = decision_logic_options.index(
 
 # Add a reset button for filters
 if st.sidebar.button("Reset Filters"):
-    st.session_state['reset_filters'] = True
+    st.session_state['reset_filters_flag'] = True
     st.rerun()
 
 
