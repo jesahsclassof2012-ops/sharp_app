@@ -544,6 +544,13 @@ selected_decision_logic_filter = st.sidebar.selectbox(
     index=2 # 'Verified Sharp Play Confidence' as default
 )
 
+# Add a reset button for filters
+if st.sidebar.button("Reset Filters"):
+    st.session_state['time_window_input'] = 1
+    st.session_state['selected_decision_logic_filter'] = 'Verified Sharp Play Confidence'
+    st.session_state['refresh_data'] = True # Trigger data refresh after resetting filters
+    st.rerun()
+
 
 # Add a state variable to trigger refresh
 if 'refresh_data' not in st.session_state:
