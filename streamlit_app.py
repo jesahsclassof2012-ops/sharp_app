@@ -523,6 +523,8 @@ def fetch_and_process_data(sport):
 
 st.title("Sports Betting Consensus Picks")
 
+st.markdown("Look for the `>>` or `>` arrow on the left side of the screen (especially on mobile) to open the sidebar and access filters and data refresh options.")
+
 sports = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
 selected_sport = st.sidebar.selectbox("Select a Sport", sports)
 
