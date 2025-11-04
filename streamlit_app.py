@@ -609,9 +609,10 @@ if selected_decision_logic_filter == 'Lean Sharp / Monitor Confidence':
         df_filtered_by_decision_logic = pd.DataFrame()
 elif selected_decision_logic_filter == 'Verified Sharp Play Confidence':
     if not df_picks_filtered.empty and 'Decision Logic' in df_picks_filtered.columns and 'Confidence Score Label' in df_picks_filtered.columns:
+        # Corrected this line to use df_picks_filtered instead of df_filtered_by_decision_logic
         df_filtered_by_decision_logic = df_picks_filtered[
             (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
-            (df_filtered_by_decision_logic['Confidence Score Label'] == '🔒 Verified Sharp Play')
+            (df_picks_filtered['Confidence Score Label'] == '🔒 Verified Sharp Play')
         ].copy()
     else:
          df_filtered_by_decision_logic = pd.DataFrame()
