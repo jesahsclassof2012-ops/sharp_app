@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import re
 from collections import defaultdict
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pytz
 
 # Set page config
@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 
-# Define the dynamic threshold function (moved here for self-containment)
+# Define the dynamic threshold function
 def get_dynamic_threshold(bets_percentage):
     """
     Calculates the required difference between Money % and Bets %
@@ -429,6 +429,46 @@ def fetch_and_process_data(sport):
                         'Home Odds': home_odds
                     })
 
+        if not df_total.empty:
+            for index, row in df_total.iterrows():
+                matchup = row['Matchup Teams']
+                team1_name, team2_name = matchup.split(" vs ")
+                away_odds = row.get('Away Odds', 'N/A')
+                home_odds = row.get('Home Odds', 'N/A')
+                matchup_time = row.get('Matchup Time', 'N/A')
+
+                over_bets = row.get('Over Bets %')
+                over_money = row.get('Over Money %')
+                if over_bets is not None and over_money is not None:
+                    qualified_picks.append({
+                        'Matchup': matchup,
+                        'Team': f"Over {row.get('Total Line', 'N/A')}",
+                        'Matchup Time': matchup_time,
+                        'Betting Category': 'Total',
+                        'Bets %': over_bets,
+                        'Money %': over_money,
+                        'Required Diff %': required_diff,
+                        'Actual Diff %': round(over_money - over_bets, 2),
+                        'Away Odds': away_odds,
+                        'Home Odds': home_odds
+                    })
+
+                under_bets = row.get('Under Bets %')
+                under_money = row.get('Under Money %')
+                if under_bets is not None and under_money is not None:
+                    qualified_picks.append({
+                        'Matchup': matchup,
+                        'Team': f"Under {row.get('Total Line', 'N/A')}",
+                        'Matchup Time': matchup_time,
+                        'Betting Category': 'Total',
+                        'Bets %': under_bets,
+                        'Money %': under_money,
+                        'Required Diff %': required_diff,
+                        'Actual Diff %': round(under_money - under_bets, 2),
+                        'Away Odds': away_odds,
+                        'Home Odds': home_odds
+                    })
+
 
         df_picks_meeting_thresholds = pd.DataFrame(qualified_picks)
 
@@ -456,6 +496,19 @@ def fetch_and_process_data(sport):
                                                           (0.05 * df_picks_meeting_thresholds['Disagreement Index'])
         df_picks_meeting_thresholds['Confidence Score Label'] = df_picks_meeting_thresholds['Confidence Score'].apply(get_confidence_score_label)
 
+        # Convert 'Matchup Time' to datetime objects with error handling
+        df_picks_meeting_thresholds['Matchup Time'] = df_picks_meeting_thresholds['Matchup Time'].astype(str)
+        df_picks_meeting_thresholds['Matchup Time'] = pd.to_datetime(df_picks_meeting_thresholds['Matchup Time'], format='%m/%d %I:%M%p', errors='coerce')
+
+        # Check for any NaT values after conversion
+        if df_picks_meeting_thresholds['Matchup Time'].isnull().any():
+            st.warning("Some matchup times could not be parsed and may be excluded from time-based filtering.")
+
+        # Localize the datetime objects to PST before comparison.
+        pst = pytz.timezone('America/Los_Angeles')
+        df_picks_meeting_thresholds['Matchup Time'] = df_picks_meeting_thresholds['Matchup Time'].apply(lambda x: pst.localize(x) if pd.notnull(x) else None)
+
+
         df_picks_meeting_thresholds = df_picks_meeting_thresholds.sort_values(by=['Matchup Time', 'Relative Differential'], ascending=[True, False])
 
         desired_column_order = ['Matchup', 'Team', 'Matchup Time', 'Betting Category', 'Decision Logic', 'Confidence Score Label', 'Relative Differential', 'Bets %', 'Money %', 'Actual Diff %', 'Away Odds', 'Home Odds', 'Spread Line', 'Sport']
@@ -471,6 +524,16 @@ st.title("Sports Betting Consensus Picks")
 
 sports = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
 selected_sport = st.sidebar.selectbox("Select a Sport", sports)
+
+# Add time window input to the sidebar with a default value of 24 hours
+time_window_hours = st.sidebar.number_input(
+    "Display games within the next (hours):",
+    min_value=1,
+    max_value=168, # Allow up to 7 days
+    value=24,
+    step=1,
+    key='time_window_input'
+)
 
 # Add a state variable to trigger refresh
 if 'refresh_data' not in st.session_state:
@@ -489,48 +552,78 @@ if selected_sport and (st.session_state['refresh_data'] or 'df_picks' not in st.
         st.session_state['current_sport'] = selected_sport
         st.session_state['refresh_data'] = False # Reset refresh state
 
-    # Display data if available in session state
-    if 'df_picks' in st.session_state and not st.session_state['df_picks'].empty:
-        st.subheader(f"All Moneyline and Spread Picks for {selected_sport}")
-        st.dataframe(st.session_state['df_picks'].style.hide(axis='index'))
 
-        st.subheader(f"Moneyline Picks for {selected_sport}")
-        df_moneyline_picks = st.session_state['df_picks'][st.session_state['df_picks']['Betting Category'] == 'Moneyline'].copy()
-        if not df_moneyline_picks.empty:
-            st.dataframe(df_moneyline_picks.style.hide(axis='index'))
-        else:
-            st.write("No Moneyline picks found meeting the filter criteria.")
+# Access the dataframe from session state
+df_picks = st.session_state.get('df_picks', pd.DataFrame())
 
-        st.subheader(f"Spread Picks for {selected_sport}")
-        df_spread_picks = st.session_state['df_picks'][st.session_state['df_picks']['Betting Category'] == 'Spread'].copy()
-        if not df_spread_picks.empty:
-            st.dataframe(df_spread_picks.style.hide(axis='index'))
-        else:
-            st.write("No Spread picks found meeting the filter criteria.")
+# Get the current time in the appropriate timezone (America/Los_Angeles)
+pst = pytz.timezone('America/Los_Angeles')
+current_time_pst = datetime.now(pst)
 
-        st.subheader(f"Sharp Money Picks - Lean Sharp / Monitor Confidence for {selected_sport}")
-        df_lean_sharp_picks = st.session_state['df_picks'][
-            (st.session_state['df_picks']['Decision Logic'] == '🔒 Sharp Money Play') &
-            (st.session_state['df_picks']['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor')
-        ].copy()
-        if not df_lean_sharp_picks.empty:
-            st.dataframe(df_lean_sharp_picks.style.hide(axis='index'))
-        else:
-            st.write("No Sharp Money picks found with Lean Sharp / Monitor confidence.")
+# Calculate the end time for filtering
+end_time_pst = current_time_pst + timedelta(hours=time_window_hours)
 
-        st.subheader(f"Sharp Money Picks - Verified Sharp Play Confidence for {selected_sport}")
-        df_verified_sharp_picks = st.session_state['df_picks'][
-            (st.session_state['df_picks']['Decision Logic'] == '🔒 Sharp Money Play') &
-            (st.session_state['df_picks']['Confidence Score Label'] == '🔒 Verified Sharp Play')
-        ].copy()
-        if not df_verified_sharp_picks.empty:
-            st.dataframe(df_verified_sharp_picks.style.hide(axis='index'))
-        else:
-            st.write("No Sharp Money picks found with Verified Sharp Play confidence.")
+# Filter the DataFrame to include games within the selected time window
+if not df_picks.empty:
+    df_filtered_by_time = df_picks[
+        (df_picks['Matchup Time'] >= current_time_pst) &
+        (df_picks['Matchup Time'] <= end_time_pst)
+    ].copy()
+else:
+    df_filtered_by_time = pd.DataFrame() # Ensure df_filtered_by_time is a DataFrame even if df_picks is empty
+
+
+# Display data if available after filtering
+if not df_filtered_by_time.empty:
+    st.subheader(f"All Moneyline, Spread, and Total Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours")
+    st.dataframe(df_filtered_by_time.style.hide(axis='index'))
+
+    st.subheader(f"Moneyline Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours")
+    df_moneyline_picks = df_filtered_by_time[df_filtered_by_time['Betting Category'] == 'Moneyline'].copy()
+    if not df_moneyline_picks.empty:
+        st.dataframe(df_moneyline_picks.style.hide(axis='index'))
     else:
-        st.write(f"No data found for {selected_sport} meeting the criteria.")
+        st.write(f"No Moneyline picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
 
-# Check if refresh button at the bottom is clicked - moved to the end
+    st.subheader(f"Spread Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours")
+    df_spread_picks = df_filtered_by_time[df_filtered_by_time['Betting Category'] == 'Spread'].copy()
+    if not df_spread_picks.empty:
+        st.dataframe(df_spread_picks.style.hide(axis='index'))
+    else:
+        st.write(f"No Spread picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
+
+    st.subheader(f"Total Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours")
+    df_total_picks = df_filtered_by_time[df_filtered_by_time['Betting Category'] == 'Total'].copy()
+    if not df_total_picks.empty:
+        st.dataframe(df_total_picks.style.hide(axis='index'))
+    else:
+        st.write(f"No Total picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
+
+
+    st.subheader(f"Sharp Money Picks - Lean Sharp / Monitor Confidence for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours")
+    df_lean_sharp_picks = df_filtered_by_time[
+        (df_filtered_by_time['Decision Logic'] == '🔒 Sharp Money Play') &
+        (df_filtered_by_time['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor')
+    ].copy()
+    if not df_lean_sharp_picks.empty:
+        st.dataframe(df_lean_sharp_picks.style.hide(axis='index'))
+    else:
+        st.write(f"No Sharp Money picks found with Lean Sharp / Monitor confidence for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
+
+    st.subheader(f"Sharp Money Picks - Verified Sharp Play Confidence for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours")
+    df_verified_sharp_picks = df_filtered_by_time[
+        (df_filtered_by_time['Decision Logic'] == '🔒 Sharp Money Play') &
+        (df_filtered_by_time['Confidence Score Label'] == '🔒 Verified Sharp Play')
+    ].copy()
+    if not df_verified_sharp_picks.empty:
+        st.dataframe(df_verified_sharp_picks.style.hide(axis='index'))
+    else:
+        st.write(f"No Sharp Money picks found with Verified Sharp Play confidence for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
+else:
+    st.write(f"No data found for {st.session_state.get('current_sport', 'Selected Sport')} meeting the criteria within the next {time_window_hours} hours.")
+
+
+# Check if refresh button at the bottom is clicked
 main_page_refresh_button = st.button("Refresh Data")
 if main_page_refresh_button:
     st.session_state['refresh_data'] = True
