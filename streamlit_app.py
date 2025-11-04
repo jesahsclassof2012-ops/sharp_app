@@ -529,12 +529,12 @@ st.title("Sports Betting Consensus Picks")
 sports = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
 selected_sport = st.sidebar.selectbox("Select a Sport", sports)
 
-# Add time window input to the sidebar with a default value of 24 hours
+# Add time window input to the sidebar with a default value of 1 hour
 time_window_hours = st.sidebar.number_input(
     "Display games within the next (hours):",
     min_value=1,
     max_value=168, # Allow up to 7 days
-    value=24,
+    value=1,
     step=1,
     key='time_window_input'
 )
