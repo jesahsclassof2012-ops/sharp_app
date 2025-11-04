@@ -496,9 +496,13 @@ def fetch_and_process_data(sport):
                                                           (0.05 * df_picks_meeting_thresholds['Disagreement Index'])
         df_picks_meeting_thresholds['Confidence Score Label'] = df_picks_meeting_thresholds['Confidence Score'].apply(get_confidence_score_label)
 
-        # Convert 'Matchup Time' to datetime objects with error handling
+        # Convert 'Matchup Time' to datetime objects with error handling and correct year
         df_picks_meeting_thresholds['Matchup Time'] = df_picks_meeting_thresholds['Matchup Time'].astype(str)
-        df_picks_meeting_thresholds['Matchup Time'] = pd.to_datetime(df_picks_meeting_thresholds['Matchup Time'], format='%m/%d %I:%M%p', errors='coerce')
+        # Get the current year to use for parsing
+        current_year = datetime.now().year
+        df_picks_meeting_thresholds['Matchup Time'] = df_picks_meeting_thresholds['Matchup Time'].apply(
+            lambda x: datetime.strptime(f"{current_year}/{x}", '%Y/%m/%d %I:%M%p') if x != 'N/A' else None
+        )
 
         # Check for any NaT values after conversion
         if df_picks_meeting_thresholds['Matchup Time'].isnull().any():
