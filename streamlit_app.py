@@ -601,6 +601,12 @@ if not df_filtered_by_decision_logic.empty:
         (df_filtered_by_decision_logic['Matchup Time'] >= current_time_pst) &
         (df_filtered_by_decision_logic['Matchup Time'] <= end_time_pst)
     ].copy()
+
+    # Explicitly format 'Matchup Time' column to string before displaying
+    df_filtered_by_time_and_thresholds['Matchup Time'] = df_filtered_by_time_and_thresholds['Matchup Time'].apply(
+        lambda x: x.strftime('%m/%d %I:%M%p').replace('AM', 'am').replace('PM', 'pm') if pd.notnull(x) else 'N/A'
+    )
+
 else:
     df_filtered_by_time_and_thresholds = pd.DataFrame() # Set to empty DataFrame if decision logic filtering resulted in empty
     if not df_picks_filtered.empty: # If original data was not empty but decision logic filtering resulted in empty
