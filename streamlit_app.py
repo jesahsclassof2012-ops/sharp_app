@@ -7,6 +7,20 @@ import pandas as pd
 from datetime import datetime, timezone
 import pytz
 
+# Set page config to change sidebar menu icon/text
+st.set_page_config(
+    page_title="Sports Betting Consensus Picks",
+    layout="wide",
+    menu_items={
+        'Get Help': 'https://www.scoresandodds.com/contact',
+        'Report a bug': "https://github.com/streamlit/streamlit/issues",
+        'About': "# This is a header. This is an *extremely* cool app!"
+    },
+    initial_sidebar_state="expanded",
+    menu_icon="Sports" # Change the menu icon/text here
+)
+
+
 # Define the dynamic threshold function (moved here for self-containment)
 def get_dynamic_threshold(bets_percentage):
     """
@@ -468,12 +482,10 @@ if st.sidebar.button("Refresh Data (Sidebar)"):
     st.session_state['refresh_data'] = True
 
 # Check if refresh button at the bottom is clicked
-if st.button("Refresh Data"):
-    st.session_state['refresh_data'] = True
+main_page_refresh_button = st.button("Refresh Data")
 
-
-# Fetch data when the sport changes or the refresh state is True
-if selected_sport and (st.session_state['refresh_data'] or 'df_picks' not in st.session_state or st.session_state['current_sport'] != selected_sport):
+# Fetch data when the sport changes or the refresh state is True or main page button is clicked
+if selected_sport and (st.session_state['refresh_data'] or 'df_picks' not in st.session_state or st.session_state['current_sport'] != selected_sport or main_page_refresh_button):
     with st.spinner(f"Refreshing data for {selected_sport}..."):
         df_picks = fetch_and_process_data(selected_sport)
         st.session_state['df_picks'] = df_picks
