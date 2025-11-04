@@ -555,7 +555,8 @@ time_window_hours = st.sidebar.number_input(
     step=1,
     key='time_window_input' # Keep the key
 )
-st.session_state['current_time_window'] = time_window_hours # Update session state when value changes
+# Note: We don't need to explicitly update st.session_state['current_time_window'] here,
+# as Streamlit automatically updates session state for widgets with a key.
 
 
 # Add decision logic filter
@@ -565,7 +566,8 @@ selected_decision_logic_filter = st.sidebar.selectbox(
     index=st.session_state['current_decision_logic_index'],
     key='selected_decision_logic_filter' # Keep the key
 )
-st.session_state['current_decision_logic_index'] = decision_logic_options.index(selected_decision_logic_filter) # Update session state
+# Note: We don't need to explicitly update st.session_state['current_decision_logic_index'] here,
+# as Streamlit automatically updates session state for widgets with a key.
 
 
 # Add a reset button for filters
