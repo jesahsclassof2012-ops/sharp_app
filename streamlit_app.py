@@ -526,29 +526,46 @@ st.title("Sports Betting Consensus Picks")
 sports = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
 selected_sport = st.sidebar.selectbox("Select a Sport", sports)
 
-# Add time window input to the sidebar with a default value of 1 hour
+# Define default values for filters
+default_time_window = 1
+default_decision_logic_index = 2 # Index for 'Verified Sharp Play Confidence'
+
+# Initialize filter values in session state if not already present, or reset if needed
+if 'reset_filters' not in st.session_state:
+    st.session_state['reset_filters'] = False
+if 'current_time_window' not in st.session_state or st.session_state['reset_filters']:
+    st.session_state['current_time_window'] = default_time_window
+if 'current_decision_logic_index' not in st.session_state or st.session_state['reset_filters']:
+    st.session_state['current_decision_logic_index'] = default_decision_logic_index
+    st.session_state['reset_filters'] = False # Reset the flag
+
+
+# Add time window input to the sidebar
 time_window_hours = st.sidebar.number_input(
     "Display games within the next (hours):",
     min_value=1,
     max_value=168, # Allow up to 7 days
-    value=1,
+    value=st.session_state['current_time_window'],
     step=1,
-    key='time_window_input'
+    key='time_window_input' # Keep the key
 )
+st.session_state['current_time_window'] = time_window_hours # Update session state when value changes
 
 
 # Add decision logic filter
+decision_logic_options = ['All Picks', 'Lean Sharp / Monitor Confidence', 'Verified Sharp Play Confidence']
 selected_decision_logic_filter = st.sidebar.selectbox(
     "Filter by Decision Logic:",
-    ['All Picks', 'Lean Sharp / Monitor Confidence', 'Verified Sharp Play Confidence'],
-    index=2 # 'Verified Sharp Play Confidence' as default
+    decision_logic_options,
+    index=st.session_state['current_decision_logic_index'],
+    key='selected_decision_logic_filter' # Keep the key
 )
+st.session_state['current_decision_logic_index'] = decision_logic_options.index(selected_decision_logic_filter) # Update session state
+
 
 # Add a reset button for filters
 if st.sidebar.button("Reset Filters"):
-    st.session_state['time_window_input'] = 1
-    st.session_state['selected_decision_logic_filter'] = 'Verified Sharp Play Confidence'
-    st.session_state['refresh_data'] = True # Trigger data refresh after resetting filters
+    st.session_state['reset_filters'] = True
     st.rerun()
 
 
@@ -597,7 +614,7 @@ elif selected_decision_logic_filter == 'Verified Sharp Play Confidence':
         ].copy()
     else:
          df_filtered_by_decision_logic = pd.DataFrame()
-else: # 'All Picks' or if columns are missing for filtering
+else: # 'All Picks'
     df_filtered_by_decision_logic = df_picks_filtered.copy() # Start with the fetched data
 
 
