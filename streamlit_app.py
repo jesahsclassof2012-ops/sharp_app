@@ -578,7 +578,7 @@ if selected_sport and (st.session_state['refresh_data'] or 'df_picks' not in st.
 
 
 # Access the dataframe from session state
-df_picks = st.session_state.get('df_picks', pd.DataFrame())
+df_picks_filtered = st.session_state.get('df_picks', pd.DataFrame())
 
 # Get the current time in the appropriate timezone (America/Los_Angeles)
 pst = pytz.timezone('America/Los_Angeles')
@@ -588,15 +588,16 @@ current_time_pst = datetime.now(pst)
 end_time_pst = current_time_pst + timedelta(hours=time_window_hours)
 
 # Filter the DataFrame to include games within the selected time window and minimum thresholds
-if not df_picks.empty:
-    df_filtered_by_time_and_thresholds = df_picks[
-        (df_picks['Matchup Time'] >= current_time_pst) &
-        (df_picks['Matchup Time'] <= end_time_pst) &
-        (df_picks['Relative Differential'].abs() >= min_relative_differential) &
-        (df_picks['Confidence Score'].abs() >= min_confidence_score)
+if not df_picks_filtered.empty:
+    df_filtered_by_time_and_thresholds = df_picks_filtered[
+        (df_picks_filtered['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
+        (df_picks_filtered['Matchup Time'] >= current_time_pst) &
+        (df_picks_filtered['Matchup Time'] <= end_time_pst) &
+        (df_picks_filtered['Relative Differential'].abs() >= min_relative_differential) &
+        (df_picks_filtered['Confidence Score'].abs() >= min_confidence_score)
     ].copy()
 else:
-    df_filtered_by_time_and_thresholds = pd.DataFrame() # Ensure df_filtered_by_time_and_thresholds is a DataFrame even if df_picks is empty
+    df_filtered_by_time_and_thresholds = pd.DataFrame() # Ensure df_filtered_by_time_and_thresholds is a DataFrame even if df_picks_filtered is empty
 
 
 # Display data if available after filtering
