@@ -464,12 +464,13 @@ if 'refresh_data' not in st.session_state:
     st.session_state['refresh_data'] = False
 
 # Check if refresh button in sidebar is clicked
-if st.sidebar.button("Refresh Data"):
+if st.sidebar.button("Refresh Data (Sidebar)"):
     st.session_state['refresh_data'] = True
 
 # Check if refresh button at the bottom is clicked
 if st.button("Refresh Data"):
     st.session_state['refresh_data'] = True
+
 
 # Fetch data when the sport changes or the refresh state is True
 if selected_sport and (st.session_state['refresh_data'] or 'df_picks' not in st.session_state or st.session_state['current_sport'] != selected_sport):
