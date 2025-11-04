@@ -459,8 +459,7 @@ st.title("Sports Betting Consensus Picks")
 sports = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
 selected_sport = st.sidebar.selectbox("Select a Sport", sports)
 
-
-if st.button("Refresh Data"):
+if st.sidebar.button("Refresh Data"):
     if selected_sport:
         df_picks = fetch_and_process_data(selected_sport)
 
