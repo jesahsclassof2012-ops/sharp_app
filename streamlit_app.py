@@ -489,7 +489,9 @@ def fetch_and_process_data(sport):
             lambda row: row['Actual Diff %'] * row['Bets %'] / 100 if row['Bets %'] is not None else None,
             axis=1
         )
+        # Apply Relative Differential filter here
         df_picks_meeting_thresholds = df_picks_meeting_thresholds[df_picks_meeting_thresholds['Relative Differential'].abs() >= 1].copy()
+
         df_picks_meeting_thresholds['Confidence Score'] = (0.45 * df_picks_meeting_thresholds['Relative Differential']) + \
                                                           (0.35 * df_picks_meeting_thresholds['Actual Diff %']) + \
                                                           (0.15 * df_picks_meeting_thresholds['Weighted Signal'] * 100) - \
@@ -588,15 +590,19 @@ current_time_pst = datetime.now(pst)
 end_time_pst = current_time_pst + timedelta(hours=time_window_hours)
 
 # Filter the DataFrame to include games within the selected time window and minimum thresholds
-# Check if df_picks_filtered is not empty before attempting to filter on columns
 if not df_picks_filtered.empty:
-    df_filtered_by_time_and_thresholds = df_picks_filtered[
-        (df_picks_filtered['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
-        (df_picks_filtered['Matchup Time'] >= current_time_pst) &
-        (df_picks_filtered['Matchup Time'] <= end_time_pst) &
-        (df_picks_filtered['Relative Differential'].abs() >= min_relative_differential) &
-        (df_picks_filtered['Confidence Score'].abs() >= min_confidence_score)
-    ].copy()
+    # Apply filters after ensuring columns exist
+    if 'Relative Differential' in df_picks_filtered.columns and 'Confidence Score' in df_picks_filtered.columns:
+        df_filtered_by_time_and_thresholds = df_picks_filtered[
+            (df_picks_filtered['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
+            (df_picks_filtered['Matchup Time'] >= current_time_pst) &
+            (df_picks_filtered['Matchup Time'] <= end_time_pst) &
+            (df_picks_filtered['Relative Differential'].abs() >= min_relative_differential) &
+            (df_picks_filtered['Confidence Score'].abs() >= min_confidence_score)
+        ].copy()
+    else:
+         st.warning("Required columns for filtering ('Relative Differential' or 'Confidence Score') not found in the data.")
+         df_filtered_by_time_and_thresholds = pd.DataFrame()
 else:
     df_filtered_by_time_and_thresholds = pd.DataFrame() # Ensure df_filtered_by_time_and_thresholds is a DataFrame even if df_picks_filtered is empty
 
