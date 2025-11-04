@@ -588,6 +588,7 @@ current_time_pst = datetime.now(pst)
 end_time_pst = current_time_pst + timedelta(hours=time_window_hours)
 
 # Filter the DataFrame to include games within the selected time window and minimum thresholds
+# Check if df_picks_filtered is not empty before attempting to filter on columns
 if not df_picks_filtered.empty:
     df_filtered_by_time_and_thresholds = df_picks_filtered[
         (df_picks_filtered['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
