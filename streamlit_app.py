@@ -459,46 +459,50 @@ st.title("Sports Betting Consensus Picks")
 sports = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
 selected_sport = st.sidebar.selectbox("Select a Sport", sports)
 
-if st.sidebar.button("Refresh Data"):
-    if selected_sport:
+# Fetch data when the sport changes or the refresh button is clicked
+if selected_sport:
+    if st.sidebar.button("Refresh Data") or 'df_picks' not in st.session_state or st.session_state['current_sport'] != selected_sport:
         df_picks = fetch_and_process_data(selected_sport)
+        st.session_state['df_picks'] = df_picks
+        st.session_state['current_sport'] = selected_sport
 
-        if not df_picks.empty:
-            st.subheader(f"All Moneyline and Spread Picks for {selected_sport}")
-            st.dataframe(df_picks.style.hide(axis='index'))
+    # Display data if available in session state
+    if 'df_picks' in st.session_state and not st.session_state['df_picks'].empty:
+        st.subheader(f"All Moneyline and Spread Picks for {selected_sport}")
+        st.dataframe(st.session_state['df_picks'].style.hide(axis='index'))
 
-            st.subheader(f"Moneyline Picks for {selected_sport}")
-            df_moneyline_picks = df_picks[df_picks['Betting Category'] == 'Moneyline'].copy()
-            if not df_moneyline_picks.empty:
-                st.dataframe(df_moneyline_picks.style.hide(axis='index'))
-            else:
-                st.write("No Moneyline picks found meeting the filter criteria.")
-
-            st.subheader(f"Spread Picks for {selected_sport}")
-            df_spread_picks = df_picks[df_picks['Betting Category'] == 'Spread'].copy()
-            if not df_spread_picks.empty:
-                st.dataframe(df_spread_picks.style.hide(axis='index'))
-            else:
-                st.write("No Spread picks found meeting the filter criteria.")
-
-            st.subheader(f"Sharp Money Picks - Lean Sharp / Monitor Confidence for {selected_sport}")
-            df_lean_sharp_picks = df_picks[
-                (df_picks['Decision Logic'] == '🔒 Sharp Money Play') &
-                (df_picks['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor')
-            ].copy()
-            if not df_lean_sharp_picks.empty:
-                st.dataframe(df_lean_sharp_picks.style.hide(axis='index'))
-            else:
-                st.write("No Sharp Money picks found with Lean Sharp / Monitor confidence.")
-
-            st.subheader(f"Sharp Money Picks - Verified Sharp Play Confidence for {selected_sport}")
-            df_verified_sharp_picks = df_picks[
-                (df_picks['Decision Logic'] == '🔒 Sharp Money Play') &
-                (df_picks['Confidence Score Label'] == '🔒 Verified Sharp Play')
-            ].copy()
-            if not df_verified_sharp_picks.empty:
-                st.dataframe(df_verified_sharp_picks.style.hide(axis='index'))
-            else:
-                st.write("No Sharp Money picks found with Verified Sharp Play confidence.")
+        st.subheader(f"Moneyline Picks for {selected_sport}")
+        df_moneyline_picks = st.session_state['df_picks'][st.session_state['df_picks']['Betting Category'] == 'Moneyline'].copy()
+        if not df_moneyline_picks.empty:
+            st.dataframe(df_moneyline_picks.style.hide(axis='index'))
         else:
-            st.write(f"No data found for {selected_sport} meeting the criteria.")
+            st.write("No Moneyline picks found meeting the filter criteria.")
+
+        st.subheader(f"Spread Picks for {selected_sport}")
+        df_spread_picks = st.session_state['df_picks'][st.session_state['df_picks']['Betting Category'] == 'Spread'].copy()
+        if not df_spread_picks.empty:
+            st.dataframe(df_spread_picks.style.hide(axis='index'))
+        else:
+            st.write("No Spread picks found meeting the filter criteria.")
+
+        st.subheader(f"Sharp Money Picks - Lean Sharp / Monitor Confidence for {selected_sport}")
+        df_lean_sharp_picks = st.session_state['df_picks'][
+            (st.session_state['df_picks']['Decision Logic'] == '🔒 Sharp Money Play') &
+            (st.session_state['df_picks']['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor')
+        ].copy()
+        if not df_lean_sharp_picks.empty:
+            st.dataframe(df_lean_sharp_picks.style.hide(axis='index'))
+        else:
+            st.write("No Sharp Money picks found with Lean Sharp / Monitor confidence.")
+
+        st.subheader(f"Sharp Money Picks - Verified Sharp Play Confidence for {selected_sport}")
+        df_verified_sharp_picks = st.session_state['df_picks'][
+            (st.session_state['df_picks']['Decision Logic'] == '🔒 Sharp Money Play') &
+            (st.session_state['df_picks']['Confidence Score Label'] == '🔒 Verified Sharp Play')
+        ].copy()
+        if not df_verified_sharp_picks.empty:
+            st.dataframe(df_verified_sharp_picks.style.hide(axis='index'))
+        else:
+            st.write("No Sharp Money picks found with Verified Sharp Play confidence.")
+    else:
+        st.write(f"No data found for {selected_sport} meeting the criteria.")
