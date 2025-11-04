@@ -580,10 +580,16 @@ if selected_sport and (st.session_state['refresh_data'] or 'df_picks' not in st.
         st.session_state['df_picks'] = df_picks_processed
         st.session_state['current_sport'] = selected_sport
         st.session_state['refresh_data'] = False # Reset refresh state
+        st.session_state['last_updated'] = datetime.now(pytz.timezone('America/Los_Angeles')).strftime('%Y-%m-%d %I:%M:%S %p %Z')
 
 
 # Access the dataframe from session state
 df_picks_filtered = st.session_state.get('df_picks', pd.DataFrame())
+
+# Display last updated time
+if 'last_updated' in st.session_state and not df_picks_filtered.empty:
+    st.info(f"Last updated: {st.session_state['last_updated']}")
+
 
 # Get the current time in the appropriate timezone (America/Los_Angeles)
 pst = pytz.timezone('America/Los_Angeles')
@@ -605,7 +611,7 @@ elif selected_decision_logic_filter == 'Verified Sharp Play Confidence':
     if not df_picks_filtered.empty and 'Decision Logic' in df_picks_filtered.columns and 'Confidence Score Label' in df_picks_filtered.columns:
         df_filtered_by_decision_logic = df_picks_filtered[
             (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
-            (df_picks_filtered['Confidence Score Label'] == '🔒 Verified Sharp Play')
+            (df_filtered_by_decision_logic['Confidence Score Label'] == '🔒 Verified Sharp Play')
         ].copy()
     else:
          df_filtered_by_decision_logic = pd.DataFrame()
