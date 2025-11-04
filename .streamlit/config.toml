@@ -1,0 +1,13 @@
+[theme]
+primaryColor="#00FF7F"  # Spring Green (often associated with money)
+backgroundColor="#1F2C3D" # Dark blue-grey background
+secondaryBackgroundColor="#2C3E50" # Another dark shade
+textColor="#FFFFFF" # White text for contrast
+font="sans serif"
+
+[server]
+# You can add server configurations here if needed,
+# but for basic theming, the [theme] section is enough.
+# headless = true
+# port = 8501
+# enableCORS = false
