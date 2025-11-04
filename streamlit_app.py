@@ -590,21 +590,26 @@ current_time_pst = datetime.now(pst)
 end_time_pst = current_time_pst + timedelta(hours=time_window_hours)
 
 # Filter the DataFrame to include games within the selected time window and minimum thresholds
+df_filtered_by_time_and_thresholds = pd.DataFrame() # Initialize as empty DataFrame
 if not df_picks_filtered.empty:
-    # Apply filters after ensuring columns exist
-    if 'Relative Differential' in df_picks_filtered.columns and 'Confidence Score' in df_picks_filtered.columns:
-        df_filtered_by_time_and_thresholds = df_picks_filtered[
-            (df_picks_filtered['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
-            (df_picks_filtered['Matchup Time'] >= current_time_pst) &
-            (df_picks_filtered['Matchup Time'] <= end_time_pst) &
-            (df_picks_filtered['Relative Differential'].abs() >= min_relative_differential) &
-            (df_picks_filtered['Confidence Score'].abs() >= min_confidence_score)
+    # Apply time window filter
+    df_filtered_by_time = df_picks_filtered[
+        (df_picks_filtered['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
+        (df_picks_filtered['Matchup Time'] >= current_time_pst) &
+        (df_picks_filtered['Matchup Time'] <= end_time_pst)
+    ].copy()
+
+    # Apply additional filters only if the necessary columns exist after time filtering
+    if not df_filtered_by_time.empty and 'Relative Differential' in df_filtered_by_time.columns and 'Confidence Score' in df_filtered_by_time.columns:
+        df_filtered_by_time_and_thresholds = df_filtered_by_time[
+            (df_filtered_by_time['Relative Differential'].abs() >= min_relative_differential) &
+            (df_filtered_by_time['Confidence Score'].abs() >= min_confidence_score)
         ].copy()
-    else:
-         st.warning("Required columns for filtering ('Relative Differential' or 'Confidence Score') not found in the data.")
-         df_filtered_by_time_and_thresholds = pd.DataFrame()
+    elif not df_filtered_by_time.empty:
+         st.warning("Required columns for filtering ('Relative Differential' or 'Confidence Score') not found in the data after time filtering.")
+         df_filtered_by_time_and_thresholds = df_filtered_by_time.copy() # Keep time-filtered data if other columns are missing
 else:
-    df_filtered_by_time_and_thresholds = pd.DataFrame() # Ensure df_filtered_by_time_and_thresholds is a DataFrame even if df_picks_filtered is empty
+    st.info("No data available to filter.")
 
 
 # Display data if available after filtering
