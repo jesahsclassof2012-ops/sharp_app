@@ -571,8 +571,8 @@ if st.sidebar.button("Refresh Data (Sidebar)"):
 # Fetch data when the sport changes or the refresh state is True
 if selected_sport and (st.session_state['refresh_data'] or 'df_picks' not in st.session_state or st.session_state['current_sport'] != selected_sport):
     with st.spinner(f"Refreshing data for {selected_sport}..."):
-        df_picks = fetch_and_process_data(selected_sport)
-        st.session_state['df_picks'] = df_picks
+        df_picks_processed = fetch_and_process_data(selected_sport)
+        st.session_state['df_picks'] = df_picks_processed
         st.session_state['current_sport'] = selected_sport
         st.session_state['refresh_data'] = False # Reset refresh state
 
