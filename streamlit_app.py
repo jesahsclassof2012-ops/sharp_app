@@ -530,14 +530,16 @@ selected_sport = st.sidebar.selectbox("Select a Sport", sports)
 
 # Define default values for filters
 default_time_window = 1
-decision_logic_options = ['All Picks', 'Lean Sharp / Monitor Confidence', 'Verified Sharp Play Confidence']
-default_decision_logic_index = decision_logic_options.index('Verified Sharp Play Confidence') # Index for 'Verified Sharp Play Confidence'
+decision_logic_options = ['All Picks', 'High Confidence']
+# Update default_decision_logic_index to point to 'High Confidence' in the new list
+default_decision_logic_index = decision_logic_options.index('High Confidence')
 
 # Initialize filter values in session state if not already present
 if 'current_time_window' not in st.session_state:
     st.session_state['current_time_window'] = default_time_window
-if 'current_decision_logic_index' not in st.session_state:
-    st.session_state['current_decision_logic_index'] = default_decision_logic_index
+
+if 'current_decision_logic_index' not in st.session_state or st.session_state['current_decision_logic_index'] >= len(decision_logic_options):
+     st.session_state['current_decision_logic_index'] = default_decision_logic_index
 
 
 # Add time window input to the sidebar
@@ -599,23 +601,15 @@ current_time_pst = datetime.now(pst)
 end_time_pst = current_time_pst + timedelta(hours=time_window_hours)
 
 # Filter the DataFrame based on the selected Decision Logic filter
-if selected_decision_logic_filter == 'Lean Sharp / Monitor Confidence':
+if selected_decision_logic_filter == 'High Confidence':
     if not df_picks_filtered.empty and 'Decision Logic' in df_picks_filtered.columns and 'Confidence Score Label' in df_picks_filtered.columns:
         df_filtered_by_decision_logic = df_picks_filtered[
             (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
-            (df_picks_filtered['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor')
+            ((df_picks_filtered['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor') |
+             (df_picks_filtered['Confidence Score Label'] == '🔒 Verified Sharp Play'))
         ].copy()
     else:
         df_filtered_by_decision_logic = pd.DataFrame()
-elif selected_decision_logic_filter == 'Verified Sharp Play Confidence':
-    if not df_picks_filtered.empty and 'Decision Logic' in df_picks_filtered.columns and 'Confidence Score Label' in df_picks_filtered.columns:
-        # Corrected this line to use df_picks_filtered instead of df_filtered_by_decision_logic
-        df_filtered_by_decision_logic = df_picks_filtered[
-            (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
-            (df_picks_filtered['Confidence Score Label'] == '🔒 Verified Sharp Play')
-        ].copy()
-    else:
-         df_filtered_by_decision_logic = pd.DataFrame()
 else: # 'All Picks'
     df_filtered_by_decision_logic = df_picks_filtered.copy() # Start with the fetched data
 
