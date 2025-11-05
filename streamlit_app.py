@@ -483,10 +483,6 @@ def fetch_and_process_data(sport):
         df_picks_meeting_thresholds['Consensus Strength'] = df_picks_meeting_thresholds[['Bets %', 'Money %']].max(axis=1)
         df_picks_meeting_thresholds['Weighted Signal'] = df_picks_meeting_thresholds['est_handle'] * df_picks_meeting_thresholds['Disagreement Index'] * df_picks_meeting_thresholds['Consensus Strength'] / 1_000_000
         df_picks_meeting_thresholds['Decision Logic'] = df_picks_meeting_thresholds['Actual Diff %'].apply(get_decision_label)
-        df_picks_meeting_thresholds['Relative Differential'] = df_picks_meeting_thresholds.apply(
-            lambda row: row['Actual Diff %'] * row['Bets %'] / 100 if row['Bets %'] is not None else None,
-            axis=1
-        )
         df_picks_meeting_thresholds['Confidence Score'] = (0.45 * df_picks_meeting_thresholds['Relative Differential']) + \
                                                           (0.35 * df_picks_meeting_thresholds['Actual Diff %']) + \
                                                           (0.15 * df_picks_meeting_thresholds['Weighted Signal'] * 100) - \
@@ -538,6 +534,7 @@ default_decision_logic_index = decision_logic_options.index('High Confidence')
 if 'current_time_window' not in st.session_state:
     st.session_state['current_time_window'] = default_time_window
 
+# Check if the current decision logic index in session state is valid for the current options
 if 'current_decision_logic_index' not in st.session_state or st.session_state['current_decision_logic_index'] >= len(decision_logic_options):
      st.session_state['current_decision_logic_index'] = default_decision_logic_index
 
@@ -592,6 +589,19 @@ df_picks_filtered = st.session_state.get('df_picks', pd.DataFrame())
 if 'last_updated' in st.session_state and not df_picks_filtered.empty:
     st.info(f"Last updated: {st.session_state['last_updated']}")
 
+# Define a function to apply color highlights
+def color_cells(val):
+    if isinstance(val, str):
+        if '🔒 Sharp Money Play' in val or '🔒 Verified Sharp Play' in val:
+            return 'background-color: #d4edda' # Greenish for sharp/verified sharp
+        elif '⚙️ Lean Sharp / Monitor' in val:
+             return 'background-color: #fff3cd' # Yellowish for lean/monitor
+        elif '🚫 Public Trap (Fade)' in val or '⚠️ Public-lean bias' in val:
+            return 'background-color: #f8d7da' # Reddish for fade/public bias
+        elif '🤷‍♂️ No Signal' in val:
+            return 'background-color: #e9ecef' # Grayish for no signal
+    return '' # No highlight for other values
+
 
 # Get the current time in the appropriate timezone (America/Los_Angeles)
 pst = pytz.timezone('America/Los_Angeles')
@@ -636,28 +646,43 @@ else:
 # Display data if available after filtering
 if not df_filtered_by_time_and_thresholds.empty:
     st.subheader(f"{selected_decision_logic_filter} for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours")
-    st.dataframe(df_filtered_by_time_and_thresholds.style.hide(axis='index'))
+
+    # Apply color highlighting to the relevant columns
+    styled_df = df_filtered_by_time_and_thresholds.style.applymap(
+        color_cells, subset=['Decision Logic', 'Confidence Score Label']
+    ).hide(axis='index')
+
+    st.dataframe(styled_df)
 
     # Only display separate categories if 'All Picks' is selected for Decision Logic
     if selected_decision_logic_filter == 'All Picks':
         st.subheader(f"Moneyline Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria")
         df_moneyline_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Moneyline'].copy()
         if not df_moneyline_picks.empty:
-            st.dataframe(df_moneyline_picks.style.hide(axis='index'))
+             styled_moneyline_df = df_moneyline_picks.style.applymap(
+                 color_cells, subset=['Decision Logic', 'Confidence Score Label']
+             ).hide(axis='index')
+             st.dataframe(styled_moneyline_df)
         else:
             st.write(f"No Moneyline picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
 
         st.subheader(f"Spread Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria")
         df_spread_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Spread'].copy()
         if not df_spread_picks.empty:
-            st.dataframe(df_spread_picks.style.hide(axis='index'))
+            styled_spread_df = df_spread_picks.style.applymap(
+                color_cells, subset=['Decision Logic', 'Confidence Score Label']
+            ).hide(axis='index')
+            st.dataframe(styled_spread_df)
         else:
             st.write(f"No Spread picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
 
         st.subheader(f"Total Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria")
         df_total_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Total'].copy()
         if not df_total_picks.empty:
-            st.dataframe(df_total_picks.style.hide(axis='index'))
+             styled_total_df = df_total_picks.style.applymap(
+                 color_cells, subset=['Decision Logic', 'Confidence Score Label']
+             ).hide(axis='index')
+             st.dataframe(styled_total_df)
         else:
             st.write(f"No Total picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
 
