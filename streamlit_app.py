@@ -523,19 +523,23 @@ def fetch_and_process_data(sport):
 
 st.title("Sports Betting Consensus Picks")
 
+st.markdown("Look for the `>>` or `>` arrow on the left side of the screen (especially on mobile) to open the sidebar and access filters and data refresh options.")
+
 sports = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
 selected_sport = st.sidebar.selectbox("Select a Sport", sports)
 
 # Define default values for filters
 default_time_window = 1
-decision_logic_options = ['All Picks', 'Lean Sharp / Monitor Confidence', 'Verified Sharp Play Confidence']
-default_decision_logic_index = decision_logic_options.index('Verified Sharp Play Confidence') # Index for 'Verified Sharp Play Confidence'
+decision_logic_options = ['All Picks', 'High Confidence']
+# Update default_decision_logic_index to point to 'High Confidence' in the new list
+default_decision_logic_index = decision_logic_options.index('High Confidence')
 
 # Initialize filter values in session state if not already present
 if 'current_time_window' not in st.session_state:
     st.session_state['current_time_window'] = default_time_window
-if 'current_decision_logic_index' not in st.session_state:
-    st.session_state['current_decision_logic_index'] = default_decision_logic_index
+
+if 'current_decision_logic_index' not in st.session_state or st.session_state['current_decision_logic_index'] >= len(decision_logic_options):
+     st.session_state['current_decision_logic_index'] = default_decision_logic_index
 
 
 # Add time window input to the sidebar
@@ -578,10 +582,16 @@ if selected_sport and (st.session_state['refresh_data'] or 'df_picks' not in st.
         st.session_state['df_picks'] = df_picks_processed
         st.session_state['current_sport'] = selected_sport
         st.session_state['refresh_data'] = False # Reset refresh state
+        st.session_state['last_updated'] = datetime.now(pytz.timezone('America/Los_Angeles')).strftime('%Y-%m-%d %I:%M:%S %p %Z')
 
 
 # Access the dataframe from session state
 df_picks_filtered = st.session_state.get('df_picks', pd.DataFrame())
+
+# Display last updated time
+if 'last_updated' in st.session_state and not df_picks_filtered.empty:
+    st.info(f"Last updated: {st.session_state['last_updated']}")
+
 
 # Get the current time in the appropriate timezone (America/Los_Angeles)
 pst = pytz.timezone('America/Los_Angeles')
@@ -591,22 +601,15 @@ current_time_pst = datetime.now(pst)
 end_time_pst = current_time_pst + timedelta(hours=time_window_hours)
 
 # Filter the DataFrame based on the selected Decision Logic filter
-if selected_decision_logic_filter == 'Lean Sharp / Monitor Confidence':
+if selected_decision_logic_filter == 'High Confidence':
     if not df_picks_filtered.empty and 'Decision Logic' in df_picks_filtered.columns and 'Confidence Score Label' in df_picks_filtered.columns:
         df_filtered_by_decision_logic = df_picks_filtered[
             (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
-            (df_picks_filtered['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor')
+            ((df_picks_filtered['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor') |
+             (df_picks_filtered['Confidence Score Label'] == '🔒 Verified Sharp Play'))
         ].copy()
     else:
         df_filtered_by_decision_logic = pd.DataFrame()
-elif selected_decision_logic_filter == 'Verified Sharp Play Confidence':
-    if not df_picks_filtered.empty and 'Decision Logic' in df_picks_filtered.columns and 'Confidence Score Label' in df_picks_filtered.columns:
-        df_filtered_by_decision_logic = df_picks_filtered[
-            (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
-            (df_picks_filtered['Confidence Score Label'] == '🔒 Verified Sharp Play')
-        ].copy()
-    else:
-         df_filtered_by_decision_logic = pd.DataFrame()
 else: # 'All Picks'
     df_filtered_by_decision_logic = df_picks_filtered.copy() # Start with the fetched data
 
