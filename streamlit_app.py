@@ -483,6 +483,10 @@ def fetch_and_process_data(sport):
         df_picks_meeting_thresholds['Consensus Strength'] = df_picks_meeting_thresholds[['Bets %', 'Money %']].max(axis=1)
         df_picks_meeting_thresholds['Weighted Signal'] = df_picks_meeting_thresholds['est_handle'] * df_picks_meeting_thresholds['Disagreement Index'] * df_picks_meeting_thresholds['Consensus Strength'] / 1_000_000
         df_picks_meeting_thresholds['Decision Logic'] = df_picks_meeting_thresholds['Actual Diff %'].apply(get_decision_label)
+        df_picks_meeting_thresholds['Relative Differential'] = df_picks_meeting_thresholds.apply(
+            lambda row: row['Actual Diff %'] * row['Bets %'] / 100 if row['Bets %'] is not None else None,
+            axis=1
+        )
         df_picks_meeting_thresholds['Confidence Score'] = (0.45 * df_picks_meeting_thresholds['Relative Differential']) + \
                                                           (0.35 * df_picks_meeting_thresholds['Actual Diff %']) + \
                                                           (0.15 * df_picks_meeting_thresholds['Weighted Signal'] * 100) - \
@@ -591,7 +595,7 @@ if 'last_updated' in st.session_state and not df_picks_filtered.empty:
 
 # Define a function to apply color highlights to the Betting Category column
 def highlight_betting_category(row):
-    styles = [''] * len(row) # Initialize a list of empty styles for each cell in the row
+    styles = [''] * len(row.index) # Initialize a list of empty styles for each cell in the row
     decision_logic = row.get('Decision Logic')
     confidence_label = row.get('Confidence Score Label')
 
@@ -601,6 +605,7 @@ def highlight_betting_category(row):
     except KeyError:
         # If 'Betting Category' column is not present, return empty styles
         return styles
+
 
     if decision_logic == '🔒 Sharp Money Play' and confidence_label == '🔒 Verified Sharp Play':
         # Green for Verified Sharp Play
@@ -658,7 +663,7 @@ if not df_filtered_by_decision_logic.empty:
     df_filtered_by_time_and_thresholds = df_filtered_by_decision_logic[
         (df_filtered_by_decision_logic['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
         (df_filtered_by_decision_logic['Matchup Time'] >= current_time_pst) &
-        (df_filtered_by_decision_and_thresholds['Matchup Time'] <= end_time_pst)
+        (df_filtered_by_decision_logic['Matchup Time'] <= end_time_pst) # Corrected variable name here
     ].copy()
 
     # Explicitly format 'Matchup Time' column to string before displaying
