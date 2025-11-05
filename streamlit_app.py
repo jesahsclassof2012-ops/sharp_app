@@ -593,17 +593,21 @@ df_picks_filtered = st.session_state.get('df_picks', pd.DataFrame())
 if 'last_updated' in st.session_state and not df_picks_filtered.empty:
     st.info(f"Last updated: {st.session_state['last_updated']}")
 
-# Define a function to apply color highlights
+# Define a function to apply color highlights (tuned for dark mode)
 def color_cells(val):
     if isinstance(val, str):
         if '🔒 Sharp Money Play' in val or '🔒 Verified Sharp Play' in val:
-            return 'background-color: #d4edda' # Greenish for sharp/verified sharp
+            # Using shades of green that are visible on dark backgrounds
+            return 'background-color: #28a745; color: white;'
         elif '⚙️ Lean Sharp / Monitor' in val:
-             return 'background-color: #fff3cd' # Yellowish for lean/monitor
+             # Using shades of yellow/orange that are visible on dark backgrounds
+             return 'background-color: #ffc107; color: black;'
         elif '🚫 Public Trap (Fade)' in val or '⚠️ Public-lean bias' in val:
-            return 'background-color: #f8d7da' # Reddish for fade/public bias
+            # Using shades of red that are visible on dark backgrounds
+            return 'background-color: #dc3545; color: white;'
         elif '🤷‍♂️ No Signal' in val:
-            return 'background-color: #e9ecef' # Grayish for no signal
+            # Using a subtle gray
+            return 'background-color: #6c757d; color: white;'
     return '' # No highlight for other values
 
 
