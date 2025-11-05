@@ -483,6 +483,10 @@ def fetch_and_process_data(sport):
         df_picks_meeting_thresholds['Consensus Strength'] = df_picks_meeting_thresholds[['Bets %', 'Money %']].max(axis=1)
         df_picks_meeting_thresholds['Weighted Signal'] = df_picks_meeting_thresholds['est_handle'] * df_picks_meeting_thresholds['Disagreement Index'] * df_picks_meeting_thresholds['Consensus Strength'] / 1_000_000
         df_picks_meeting_thresholds['Decision Logic'] = df_picks_meeting_thresholds['Actual Diff %'].apply(get_decision_label)
+        df_picks_meeting_thresholds['Relative Differential'] = df_picks_meeting_thresholds.apply(
+            lambda row: row['Actual Diff %'] * row['Bets %'] / 100 if row['Bets %'] is not None else None,
+            axis=1
+        )
         df_picks_meeting_thresholds['Confidence Score'] = (0.45 * df_picks_meeting_thresholds['Relative Differential']) + \
                                                           (0.35 * df_picks_meeting_thresholds['Actual Diff %']) + \
                                                           (0.15 * df_picks_meeting_thresholds['Weighted Signal'] * 100) - \
@@ -536,6 +540,8 @@ if 'current_time_window' not in st.session_state:
 
 # Check if the current decision logic index in session state is valid for the current options
 if 'current_decision_logic_index' not in st.session_state or st.session_state['current_decision_logic_index'] >= len(decision_logic_options):
+     st.session_state['current_decision_logic_index'] = default_decision_logic_index
+elif st.session_state['current_decision_logic_index'] < 0: # Also handle negative indices
      st.session_state['current_decision_logic_index'] = default_decision_logic_index
 
 
@@ -628,8 +634,8 @@ else: # 'All Picks'
 if not df_filtered_by_decision_logic.empty:
     df_filtered_by_time_and_thresholds = df_filtered_by_decision_logic[
         (df_filtered_by_decision_logic['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
-        (df_filtered_by_decision_logic['Matchup Time'] >= current_time_pst) &
-        (df_filtered_by_decision_logic['Matchup Time'] <= end_time_pst)
+        (df_filtered_by_time_and_thresholds['Matchup Time'] >= current_time_pst) &
+        (df_filtered_by_time_and_thresholds['Matchup Time'] <= end_time_pst)
     ].copy()
 
     # Explicitly format 'Matchup Time' column to string before displaying
