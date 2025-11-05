@@ -539,9 +539,7 @@ if 'current_time_window' not in st.session_state:
     st.session_state['current_time_window'] = default_time_window
 
 # Check if the current decision logic index in session state is valid for the current options
-if 'current_decision_logic_index' not in st.session_state or st.session_state['current_decision_logic_index'] >= len(decision_logic_options):
-     st.session_state['current_decision_logic_index'] = default_decision_logic_index
-elif st.session_state['current_decision_logic_index'] < 0: # Also handle negative indices
+if 'current_decision_logic_index' not in st.session_state or st.session_state['current_decision_logic_index'] >= len(decision_logic_options) or st.session_state['current_decision_logic_index'] < 0:
      st.session_state['current_decision_logic_index'] = default_decision_logic_index
 
 
@@ -617,25 +615,26 @@ current_time_pst = datetime.now(pst)
 end_time_pst = current_time_pst + timedelta(hours=time_window_hours)
 
 # Filter the DataFrame based on the selected Decision Logic filter
-if selected_decision_logic_filter == 'High Confidence':
-    if not df_picks_filtered.empty and 'Decision Logic' in df_picks_filtered.columns and 'Confidence Score Label' in df_picks_filtered.columns:
-        df_filtered_by_decision_logic = df_picks_filtered[
-            (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
-            ((df_picks_filtered['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor') |
-             (df_picks_filtered['Confidence Score Label'] == '🔒 Verified Sharp Play'))
-        ].copy()
-    else:
-        df_filtered_by_decision_logic = pd.DataFrame()
-else: # 'All Picks'
-    df_filtered_by_decision_logic = df_picks_filtered.copy() # Start with the fetched data
+df_filtered_by_decision_logic = pd.DataFrame() # Initialize to empty DataFrame
+if not df_picks_filtered.empty:
+    if selected_decision_logic_filter == 'High Confidence':
+        if 'Decision Logic' in df_picks_filtered.columns and 'Confidence Score Label' in df_picks_filtered.columns:
+            df_filtered_by_decision_logic = df_picks_filtered[
+                (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
+                ((df_picks_filtered['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor') |
+                 (df_picks_filtered['Confidence Score Label'] == '🔒 Verified Sharp Play'))
+            ].copy()
+    else: # 'All Picks'
+        df_filtered_by_decision_logic = df_picks_filtered.copy() # Start with the fetched data
 
 
 # Apply time window filter to the decision logic filtered data
+df_filtered_by_time_and_thresholds = pd.DataFrame() # Initialize to empty DataFrame
 if not df_filtered_by_decision_logic.empty:
     df_filtered_by_time_and_thresholds = df_filtered_by_decision_logic[
         (df_filtered_by_decision_logic['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
-        (df_filtered_by_time_and_thresholds['Matchup Time'] >= current_time_pst) &
-        (df_filtered_by_time_and_thresholds['Matchup Time'] <= end_time_pst)
+        (df_filtered_by_decision_logic['Matchup Time'] >= current_time_pst) &
+        (df_filtered_by_decision_logic['Matchup Time'] <= end_time_pst)
     ].copy()
 
     # Explicitly format 'Matchup Time' column to string before displaying
@@ -644,7 +643,6 @@ if not df_filtered_by_decision_logic.empty:
     )
 
 else:
-    df_filtered_by_time_and_thresholds = pd.DataFrame() # Set to empty DataFrame if decision logic filtering resulted in empty
     if not df_picks_filtered.empty: # If original data was not empty but decision logic filtering resulted in empty
          st.info(f"No picks found for the selected Decision Logic filter: {selected_decision_logic_filter}")
 
@@ -700,7 +698,8 @@ if not df_filtered_by_time_and_thresholds.empty:
     # ... (rest of the verified sharp display code)
 
 else:
-    st.write(f"No data found for {st.session_state.get('current_sport', 'Selected Sport')} meeting the criteria within the next {time_window_hours} hours.")
+    # This else block is now handled above within the time window filtering block
+    pass
 
 
 # Check if refresh button at the bottom is clicked
