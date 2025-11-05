@@ -538,7 +538,8 @@ default_decision_logic_index = decision_logic_options.index('High Confidence')
 if 'current_time_window' not in st.session_state:
     st.session_state['current_time_window'] = default_time_window
 
-if 'current_decision_logic_index' not in st.session_state or st.session_state['current_decision_logic_index'] >= len(decision_logic_options):
+# Check if the current decision logic index in session state is valid for the current options
+if 'current_decision_logic_index' not in st.session_state or st.session_state['current_decision_logic_index'] >= len(decision_logic_options) or st.session_state['current_decision_logic_index'] < 0:
      st.session_state['current_decision_logic_index'] = default_decision_logic_index
 
 
@@ -592,6 +593,23 @@ df_picks_filtered = st.session_state.get('df_picks', pd.DataFrame())
 if 'last_updated' in st.session_state and not df_picks_filtered.empty:
     st.info(f"Last updated: {st.session_state['last_updated']}")
 
+# Define a function to apply color highlights (tuned for dark mode)
+def color_cells(val):
+    if isinstance(val, str):
+        if '🔒 Sharp Money Play' in val or '🔒 Verified Sharp Play' in val:
+            # Using shades of green that are visible on dark backgrounds
+            return 'background-color: #28a745; color: white;'
+        elif '⚙️ Lean Sharp / Monitor' in val:
+             # Using shades of yellow/orange that are visible on dark backgrounds
+             return 'background-color: #ffc107; color: black;'
+        elif '🚫 Public Trap (Fade)' in val or '⚠️ Public-lean bias' in val:
+            # Using shades of red that are visible on dark backgrounds
+            return 'background-color: #dc3545; color: white;'
+        elif '🤷‍♂️ No Signal' in val:
+            # Using a subtle gray
+            return 'background-color: #6c757d; color: white;'
+    return '' # No highlight for other values
+
 
 # Get the current time in the appropriate timezone (America/Los_Angeles)
 pst = pytz.timezone('America/Los_Angeles')
@@ -601,20 +619,21 @@ current_time_pst = datetime.now(pst)
 end_time_pst = current_time_pst + timedelta(hours=time_window_hours)
 
 # Filter the DataFrame based on the selected Decision Logic filter
-if selected_decision_logic_filter == 'High Confidence':
-    if not df_picks_filtered.empty and 'Decision Logic' in df_picks_filtered.columns and 'Confidence Score Label' in df_picks_filtered.columns:
-        df_filtered_by_decision_logic = df_picks_filtered[
-            (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
-            ((df_picks_filtered['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor') |
-             (df_picks_filtered['Confidence Score Label'] == '🔒 Verified Sharp Play'))
-        ].copy()
-    else:
-        df_filtered_by_decision_logic = pd.DataFrame()
-else: # 'All Picks'
-    df_filtered_by_decision_logic = df_picks_filtered.copy() # Start with the fetched data
+df_filtered_by_decision_logic = pd.DataFrame() # Initialize to empty DataFrame
+if not df_picks_filtered.empty:
+    if selected_decision_logic_filter == 'High Confidence':
+        if 'Decision Logic' in df_picks_filtered.columns and 'Confidence Score Label' in df_picks_filtered.columns:
+            df_filtered_by_decision_logic = df_picks_filtered[
+                (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
+                ((df_picks_filtered['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor') |
+                 (df_picks_filtered['Confidence Score Label'] == '🔒 Verified Sharp Play'))
+            ].copy()
+    else: # 'All Picks'
+        df_filtered_by_decision_logic = df_picks_filtered.copy() # Start with the fetched data
 
 
 # Apply time window filter to the decision logic filtered data
+df_filtered_by_time_and_thresholds = pd.DataFrame() # Initialize to empty DataFrame
 if not df_filtered_by_decision_logic.empty:
     df_filtered_by_time_and_thresholds = df_filtered_by_decision_logic[
         (df_filtered_by_decision_logic['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
@@ -628,7 +647,6 @@ if not df_filtered_by_decision_logic.empty:
     )
 
 else:
-    df_filtered_by_time_and_thresholds = pd.DataFrame() # Set to empty DataFrame if decision logic filtering resulted in empty
     if not df_picks_filtered.empty: # If original data was not empty but decision logic filtering resulted in empty
          st.info(f"No picks found for the selected Decision Logic filter: {selected_decision_logic_filter}")
 
@@ -636,28 +654,43 @@ else:
 # Display data if available after filtering
 if not df_filtered_by_time_and_thresholds.empty:
     st.subheader(f"{selected_decision_logic_filter} for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours")
-    st.dataframe(df_filtered_by_time_and_thresholds.style.hide(axis='index'))
+
+    # Apply color highlighting to the relevant columns
+    styled_df = df_filtered_by_time_and_thresholds.style.applymap(
+        color_cells, subset=['Decision Logic', 'Confidence Score Label']
+    ).hide(axis='index')
+
+    st.dataframe(styled_df)
 
     # Only display separate categories if 'All Picks' is selected for Decision Logic
     if selected_decision_logic_filter == 'All Picks':
         st.subheader(f"Moneyline Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria")
         df_moneyline_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Moneyline'].copy()
         if not df_moneyline_picks.empty:
-            st.dataframe(df_moneyline_picks.style.hide(axis='index'))
+             styled_moneyline_df = df_moneyline_picks.style.applymap(
+                 color_cells, subset=['Decision Logic', 'Confidence Score Label']
+             ).hide(axis='index')
+             st.dataframe(styled_moneyline_df)
         else:
             st.write(f"No Moneyline picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
 
         st.subheader(f"Spread Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria")
         df_spread_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Spread'].copy()
         if not df_spread_picks.empty:
-            st.dataframe(df_spread_picks.style.hide(axis='index'))
+            styled_spread_df = df_spread_picks.style.applymap(
+                color_cells, subset=['Decision Logic', 'Confidence Score Label']
+            ).hide(axis='index')
+            st.dataframe(styled_spread_df)
         else:
             st.write(f"No Spread picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
 
         st.subheader(f"Total Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria")
         df_total_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Total'].copy()
         if not df_total_picks.empty:
-            st.dataframe(df_total_picks.style.hide(axis='index'))
+             styled_total_df = df_total_picks.style.applymap(
+                 color_cells, subset=['Decision Logic', 'Confidence Score Label']
+             ).hide(axis='index')
+             st.dataframe(styled_total_df)
         else:
             st.write(f"No Total picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
 
@@ -669,7 +702,8 @@ if not df_filtered_by_time_and_thresholds.empty:
     # ... (rest of the verified sharp display code)
 
 else:
-    st.write(f"No data found for {st.session_state.get('current_sport', 'Selected Sport')} meeting the criteria within the next {time_window_hours} hours.")
+    # This else block is now handled above within the time window filtering block
+    pass
 
 
 # Check if refresh button at the bottom is clicked
