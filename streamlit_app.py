@@ -646,89 +646,82 @@ start_time_pst = current_time_pst - timedelta(minutes=15)
 # Calculate the end time for filtering (selected hours in the future)
 end_time_pst = current_time_pst + timedelta(hours=time_window_hours)
 
-# Filter the DataFrame based on the selected Decision Logic filter
-df_filtered_by_decision_logic = pd.DataFrame() # Initialize to empty DataFrame
+# Filter the DataFrame based on the selected Decision Logic filter and time window
+df_filtered_by_time_and_thresholds = pd.DataFrame() # Initialize to empty DataFrame
+
 if not df_picks_filtered.empty:
-    if selected_decision_logic_filter == 'High Confidence':
-        if 'Decision Logic' in df_picks_filtered.columns and 'Confidence Score Label' in df_picks_filtered.columns:
-            df_filtered_by_decision_logic = df_picks_filtered[
+    # Check if required columns exist before filtering
+    required_cols = ['Decision Logic', 'Confidence Score Label', 'Matchup Time']
+    if all(col in df_picks_filtered.columns for col in required_cols):
+        if selected_decision_logic_filter == 'High Confidence':
+            df_filtered_by_time_and_thresholds = df_picks_filtered[
                 (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
                 ((df_picks_filtered['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor') |
-                 (df_picks_filtered['Confidence Score Label'] == '🔒 Verified Sharp Play'))
+                 (df_picks_filtered['Confidence Score Label'] == '🔒 Verified Sharp Play')) &
+                (df_picks_filtered['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
+                (df_picks_filtered['Matchup Time'] >= start_time_pst) & # Filter from 15 minutes ago
+                (df_picks_filtered['Matchup Time'] <= end_time_pst)
             ].copy()
-    else: # 'All Picks'
-        df_filtered_by_decision_logic = df_picks_filtered.copy() # Start with the fetched data
+        else: # 'All Picks'
+            df_filtered_by_time_and_thresholds = df_picks_filtered[
+                (df_picks_filtered['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
+                (df_picks_filtered['Matchup Time'] >= start_time_pst) & # Filter from 15 minutes ago
+                (df_picks_filtered['Matchup Time'] <= end_time_pst)
+            ].copy()
+
+        # Explicitly format 'Matchup Time' column to string before displaying, only if DataFrame is not empty
+        if not df_filtered_by_time_and_thresholds.empty:
+            df_filtered_by_time_and_thresholds['Matchup Time'] = df_filtered_by_time_and_thresholds['Matchup Time'].apply(
+                lambda x: x.strftime('%m/%d %I:%M%p').replace('AM', 'am').replace('PM', 'pm') if pd.notnull(x) else 'N/A'
+            )
+    else:
+        st.warning("Required columns for filtering ('Decision Logic', 'Confidence Score Label', or 'Matchup Time') not found in the data.")
 
 
-# Apply time window filter to the decision logic filtered data
-df_filtered_by_time_and_thresholds = pd.DataFrame() # Initialize to empty DataFrame
-if not df_filtered_by_decision_logic.empty:
-    df_filtered_by_time_and_thresholds = df_filtered_by_decision_logic[
-        (df_filtered_by_decision_logic['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
-        (df_filtered_by_decision_logic['Matchup Time'] >= start_time_pst) & # Filter from 15 minutes ago
-        (df_filtered_by_decision_logic['Matchup Time'] <= end_time_pst)
-    ].copy()
+# Display data based on filtering results
+if not df_picks_filtered.empty:
+    if not df_filtered_by_time_and_thresholds.empty:
+        st.subheader(f"{selected_decision_logic_filter} for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours (including games started in the last 15 minutes)")
 
-    # Explicitly format 'Matchup Time' column to string before displaying
-    df_filtered_by_time_and_thresholds['Matchup Time'] = df_filtered_by_time_and_thresholds['Matchup Time'].apply(
-        lambda x: x.strftime('%m/%d %I:%M%p').replace('AM', 'am').replace('PM', 'pm') if pd.notnull(x) else 'N/A'
-    )
+        # Apply color highlighting: apply for Betting Category (row-wise) and applymap for the other two (element-wise)
+        styled_df = df_filtered_by_time_and_thresholds.style.apply(highlight_betting_category, axis=1)
+        styled_df = styled_df.applymap(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
 
+        st.dataframe(styled_df)
+
+        # Only display separate categories if 'All Picks' is selected for Decision Logic
+        if selected_decision_logic_filter == 'All Picks':
+            st.subheader(f"Moneyline Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria (including games started in the last 15 minutes)")
+            df_moneyline_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Moneyline'].copy()
+            if not df_moneyline_picks.empty:
+                 styled_moneyline_df = df_moneyline_picks.style.apply(highlight_betting_category, axis=1)
+                 styled_moneyline_df = styled_moneyline_df.applymap(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
+                 st.dataframe(styled_moneyline_df)
+            else:
+                st.write(f"No Moneyline picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
+
+            st.subheader(f"Spread Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria (including games started in the last 15 minutes)")
+            df_spread_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Spread'].copy()
+            if not df_spread_picks.empty:
+                styled_spread_df = df_spread_picks.style.apply(highlight_betting_category, axis=1)
+                styled_spread_df = styled_spread_df.applymap(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
+                st.dataframe(styled_spread_df)
+            else:
+                st.write(f"No Spread picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
+
+            st.subheader(f"Total Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria (including games started in the last 15 minutes)")
+            df_total_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Total'].copy()
+            if not df_total_picks.empty:
+                 styled_total_df = df_total_picks.style.apply(highlight_betting_category, axis=1)
+                 styled_total_df = styled_total_df.applymap(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
+                 st.dataframe(styled_total_df)
+            else:
+                st.write(f"No Total picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
+
+    else:
+         st.info(f"No picks found for {st.session_state.get('current_sport', 'Selected Sport')} meeting the filter criteria within the next {time_window_hours} hours (including games started in the last 15 minutes).")
 else:
-    if not df_picks_filtered.empty: # If original data was not empty but decision logic filtering resulted in empty
-         st.info(f"No picks found for the selected Decision Logic filter: {selected_decision_logic_filter}")
-
-
-# Display data if available after filtering
-if not df_filtered_by_time_and_thresholds.empty:
-    st.subheader(f"{selected_decision_logic_filter} for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours (including games started in the last 15 minutes)")
-
-    # Apply color highlighting: apply for Betting Category (row-wise) and applymap for the other two (element-wise)
-    styled_df = df_filtered_by_time_and_thresholds.style.apply(highlight_betting_category, axis=1)
-    styled_df = styled_df.applymap(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
-
-
-    st.dataframe(styled_df)
-
-    # Only display separate categories if 'All Picks' is selected for Decision Logic
-    if selected_decision_logic_filter == 'All Picks':
-        st.subheader(f"Moneyline Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria (including games started in the last 15 minutes)")
-        df_moneyline_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Moneyline'].copy()
-        if not df_moneyline_picks.empty:
-             styled_moneyline_df = df_moneyline_picks.style.apply(highlight_betting_category, axis=1)
-             styled_moneyline_df = styled_moneyline_df.applymap(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
-             st.dataframe(styled_moneyline_df)
-        else:
-            st.write(f"No Moneyline picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
-
-        st.subheader(f"Spread Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria (including games started in the last 15 minutes)")
-        df_spread_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Spread'].copy()
-        if not df_spread_picks.empty:
-            styled_spread_df = df_spread_picks.style.apply(highlight_betting_category, axis=1)
-            styled_spread_df = styled_spread_df.applymap(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
-            st.dataframe(styled_spread_df)
-        else:
-            st.write(f"No Spread picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
-
-        st.subheader(f"Total Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria (including games started in the last 15 minutes)")
-        df_total_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Total'].copy()
-        if not df_total_picks.empty:
-             styled_total_df = df_total_picks.style.apply(highlight_betting_category, axis=1)
-             styled_total_df = styled_total_df.applymap(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
-             st.dataframe(styled_total_df)
-        else:
-            st.write(f"No Total picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
-
-    # Remove the specific Sharp Money and Verified Sharp displays as they are covered by the filter
-    # st.subheader(f"Sharp Money Picks - Lean Sharp / Monitor Confidence for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria")
-    # ... (rest of the lean sharp display code)
-
-    # st.subheader(f"Sharp Money Picks - Verified Sharp Play Confidence for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria")
-    # ... (rest of the verified sharp display code)
-
-else:
-    # This else block is now handled above within the time window filtering block
-    pass
+    st.write(f"No games scheduled for {selected_sport} today.")
 
 
 # Check if refresh button at the bottom is clicked
