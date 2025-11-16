@@ -678,7 +678,7 @@ if not df_picks_filtered.empty:
     if all(col in df_picks_filtered.columns for col in required_cols):
         if selected_decision_logic_filter == 'High Confidence':
             df_filtered_by_time_and_thresholds = df_picks_filtered[
-                (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
+                (df_picks_filtered['Relative Differential'] > 1.5) &
                 (df_picks_filtered['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
                 (df_picks_filtered['Matchup Time'] >= start_time_pst) & # Filter from 15 minutes ago
                 (df_picks_filtered['Matchup Time'] <= end_time_pst)
