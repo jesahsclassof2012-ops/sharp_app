@@ -86,20 +86,38 @@ baseline_handles = {
 scaling_factor = 0.000001
 
 # Function to determine decision logic label based on Actual Diff %
-def get_decision_label(actual_diff):
-    if actual_diff >= 15:
-        return '🔒 Sharp Money Play'
-    elif actual_diff <= -15:
-        return '🚫 Public Trap (Fade)'
-    elif actual_diff > -10 and actual_diff < 10:
-        return '🤷‍♂️ No Signal'
+def get_decision_label(relative_differential):
+    if pd.isna(relative_differential):
+        return "N/A"
+    elif relative_differential > 20:
+        return "🔥🔥 Extreme Sharp Play"
+    elif relative_differential >= 15:
+        return "🔒 Verified Sharp Play"
+    elif relative_differential >= 10:
+        return "💎 Strong Sharp"
+    elif relative_differential >= 5:
+        return "📈 Medium Sharp"
+    elif relative_differential > 0:
+        return "📊 Slight Sharp"
+    elif relative_differential == 0:
+        return "⚖️ Neutral"
+    elif relative_differential >= -5:
+        return "⬇️ Slight Public"
+    elif relative_differential >= -10:
+        return "⚠️ Public-lean bias"
+    elif relative_differential < -10:
+        return "🚨 Strong Public"
     else:
-        return 'Neutral'
+        return "Other (Unhandled Score)"
 
-# Function to determine Confidence Score Label based on Confidence Score ranges
+
 def get_confidence_score_label(confidence_score):
     if pd.isna(confidence_score):
             return "N/A"
+    elif confidence_score > 20:
+        return "🔥🔥 Extreme Sharp Play"
+    elif confidence_score >= 15:
+        return "🔒 Verified Sharp Play"
     elif confidence_score >= 10:
         return "💎 Strong Sharp"
     elif confidence_score >= 5:
@@ -270,8 +288,8 @@ def fetch_and_process_data(sport):
                          current_odds = entry_odds
                          current_matchup_time = entry_matchup_time
 
-                         spread_line_match1 = re.search(r'([\+\-]?[\d+\.]+)', team1_name_raw)
-                         spread_line_match2 = re.search(r'([\+\-]?[\d+\.]+)', team2_name_raw)
+                         spread_line_match1 = re.search(r'([\+\-]?\d+\.)', team1_name_raw)
+                         spread_line_match2 = re.search(r'([\+\-]?\d+\.)', team2_name_raw)
                          if spread_line_match1 and spread_line_match2:
                              spread_line = f"{spread_line_match1.group(1)} / {spread_line_match2.group(1)}"
 
@@ -487,11 +505,14 @@ def fetch_and_process_data(sport):
         df_picks_meeting_thresholds['Disagreement Index'] = df_picks_meeting_thresholds[['Bets %', 'Money %']].min(axis=1)
         df_picks_meeting_thresholds['Consensus Strength'] = df_picks_meeting_thresholds[['Bets %', 'Money %']].max(axis=1)
         df_picks_meeting_thresholds['Weighted Signal'] = df_picks_meeting_thresholds['est_handle'] * df_picks_meeting_thresholds['Disagreement Index'] * df_picks_meeting_thresholds['Consensus Strength'] / 1_000_000
-        df_picks_meeting_thresholds['Decision Logic'] = df_picks_meeting_thresholds['Actual Diff %'].apply(get_decision_label)
+        
+        # Calculate Relative Differential BEFORE Decision Logic
         df_picks_meeting_thresholds['Relative Differential'] = df_picks_meeting_thresholds.apply(
             lambda row: row['Actual Diff %'] * row['Bets %'] / 100 if row['Bets %'] is not None else None,
             axis=1
         )
+        df_picks_meeting_thresholds['Decision Logic'] = df_picks_meeting_thresholds['Relative Differential'].apply(get_decision_label)
+
         df_picks_meeting_thresholds['Confidence Score'] = (0.45 * df_picks_meeting_thresholds['Relative Differential']) + \
                                                           (0.35 * df_picks_meeting_thresholds['Actual Diff %']) + \
                                                           (0.15 * df_picks_meeting_thresholds['Weighted Signal'] * 100) - \
@@ -657,7 +678,7 @@ if not df_picks_filtered.empty:
     if all(col in df_picks_filtered.columns for col in required_cols):
         if selected_decision_logic_filter == 'High Confidence':
             df_filtered_by_time_and_thresholds = df_picks_filtered[
-                (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
+                (df_picks_filtered['Relative Differential'] > 1.5) &
                 (df_picks_filtered['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
                 (df_picks_filtered['Matchup Time'] >= start_time_pst) & # Filter from 15 minutes ago
                 (df_picks_filtered['Matchup Time'] <= end_time_pst)
@@ -710,7 +731,7 @@ if not df_picks_filtered.empty:
                 st.write(f"No Spread picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
 
             st.subheader(f"Total Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria (including games started in the last 15 minutes)")
-            df_total_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Total'].copy()
+            df_total_picks = df_filtered_by_time_and_thresholds[df_total_picks['Betting Category'] == 'Total'].copy()
             if not df_total_picks.empty:
                  styled_total_df = df_total_picks.style.apply(highlight_betting_category, axis=1)
                  styled_total_df = styled_total_df.applymap(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
