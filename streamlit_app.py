@@ -100,6 +100,10 @@ def get_decision_label(actual_diff):
 def get_confidence_score_label(confidence_score):
     if pd.isna(confidence_score):
             return "N/A"
+    elif confidence_score > 20:
+        return "🔥🔥 Extreme Sharp Play"
+    elif confidence_score >= 15:
+        return "🔒 Verified Sharp Play"
     elif confidence_score >= 10:
         return "💎 Strong Sharp"
     elif confidence_score >= 5:
