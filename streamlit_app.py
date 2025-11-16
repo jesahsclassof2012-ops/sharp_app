@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
@@ -748,4 +747,3 @@ main_page_refresh_button = st.button("Refresh Data")
 if main_page_refresh_button:
     st.session_state['refresh_data'] = True
     st.rerun() # Use st.rerun() to trigger a rerun of the app to fetch new data
-```
