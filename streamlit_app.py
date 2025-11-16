@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
@@ -86,17 +87,31 @@ baseline_handles = {
 scaling_factor = 0.000001
 
 # Function to determine decision logic label based on Actual Diff %
-def get_decision_label(actual_diff):
-    if actual_diff >= 15:
-        return '🔒 Sharp Money Play'
-    elif actual_diff <= -15:
-        return '🚫 Public Trap (Fade)'
-    elif actual_diff > -10 and actual_diff < 10:
-        return '🤷‍♂️ No Signal'
+def get_decision_label(relative_differential):
+    if pd.isna(relative_differential):
+        return "N/A"
+    elif relative_differential > 20:
+        return "🔥🔥 Extreme Sharp Play"
+    elif relative_differential >= 15:
+        return "🔒 Verified Sharp Play"
+    elif relative_differential >= 10:
+        return "💎 Strong Sharp"
+    elif relative_differential >= 5:
+        return "📈 Medium Sharp"
+    elif relative_differential > 0:
+        return "📊 Slight Sharp"
+    elif relative_differential == 0:
+        return "⚖️ Neutral"
+    elif relative_differential >= -5:
+        return "⬇️ Slight Public"
+    elif relative_differential >= -10:
+        return "⚠️ Public-lean bias"
+    elif relative_differential < -10:
+        return "🚨 Strong Public"
     else:
-        return 'Neutral'
+        return "Other (Unhandled Score)"
 
-# Function to determine Confidence Score Label based on Confidence Score ranges
+
 def get_confidence_score_label(confidence_score):
     if pd.isna(confidence_score):
             return "N/A"
@@ -274,8 +289,8 @@ def fetch_and_process_data(sport):
                          current_odds = entry_odds
                          current_matchup_time = entry_matchup_time
 
-                         spread_line_match1 = re.search(r'([\+\-]?[\d+\.]+)', team1_name_raw)
-                         spread_line_match2 = re.search(r'([\+\-]?[\d+\.]+)', team2_name_raw)
+                         spread_line_match1 = re.search(r'([\+\-]?\d+\.)', team1_name_raw)
+                         spread_line_match2 = re.search(r'([\+\-]?\d+\.)', team2_name_raw)
                          if spread_line_match1 and spread_line_match2:
                              spread_line = f"{spread_line_match1.group(1)} / {spread_line_match2.group(1)}"
 
@@ -491,7 +506,7 @@ def fetch_and_process_data(sport):
         df_picks_meeting_thresholds['Disagreement Index'] = df_picks_meeting_thresholds[['Bets %', 'Money %']].min(axis=1)
         df_picks_meeting_thresholds['Consensus Strength'] = df_picks_meeting_thresholds[['Bets %', 'Money %']].max(axis=1)
         df_picks_meeting_thresholds['Weighted Signal'] = df_picks_meeting_thresholds['est_handle'] * df_picks_meeting_thresholds['Disagreement Index'] * df_picks_meeting_thresholds['Consensus Strength'] / 1_000_000
-        df_picks_meeting_thresholds['Decision Logic'] = df_picks_meeting_thresholds['Actual Diff %'].apply(get_decision_label)
+        df_picks_meeting_thresholds['Decision Logic'] = df_picks_meeting_thresholds['Relative Differential'].apply(get_decision_label)
         df_picks_meeting_thresholds['Relative Differential'] = df_picks_meeting_thresholds.apply(
             lambda row: row['Actual Diff %'] * row['Bets %'] / 100 if row['Bets %'] is not None else None,
             axis=1
@@ -733,3 +748,4 @@ main_page_refresh_button = st.button("Refresh Data")
 if main_page_refresh_button:
     st.session_state['refresh_data'] = True
     st.rerun() # Use st.rerun() to trigger a rerun of the app to fetch new data
+```
