@@ -98,19 +98,24 @@ def get_decision_label(actual_diff):
 
 # Function to determine Confidence Score Label based on Confidence Score ranges
 def get_confidence_score_label(confidence_score):
-    if confidence_score >= 10 and confidence_score <= 20:
-        return '🔒 Verified Sharp Play'
-    elif confidence_score >= 5 and confidence_score < 10:
-        return '⚙️ Lean Sharp / Monitor'
-    elif confidence_score > -5 and confidence_score < 5:
-        return '🤷‍♂️ No Signal / Neutral'
-    elif confidence_score >= -10 and confidence_score <= -5:
-        return '⚠️ Public-lean bias'
+    if pd.isna(confidence_score):
+            return "N/A"
+    elif confidence_score >= 10:
+        return "💎 Strong Sharp"
+    elif confidence_score >= 5:
+        return "📈 Medium Sharp"
+    elif confidence_score > 0: # and confidence_score < 5:
+        return "📊 Slight Sharp"
+    elif confidence_score == 0:
+        return "⚖️ Neutral"
+    elif confidence_score >= -5: # and confidence_score < 0:
+        return "⬇️ Slight Public"
+    elif confidence_score >= -10: # and confidence_score < -5:
+        return "⚠️ Public-lean bias"
     elif confidence_score < -10:
-        return '🚫 Public Trap (Fade)'
+        return "🚨 Strong Public"
     else:
-        return 'Other' # Handle any cases outside the defined ranges
-
+        return "Other (Unhandled Score)"
 
 def fetch_and_process_data(sport):
     """Fetches and processes consensus pick data for a given sport."""
@@ -238,7 +243,7 @@ def fetch_and_process_data(sport):
             teams = entry.get('teams', [])
             betting_label_bets = entry.get('betting_label_bets', 'N/A')
             bets_percentages = entry.get('bets_percentages', {})
-            betting_label_money = entry.get('betting_label_money', 'N/A')
+            betting_label_money = entry.get('betting_label_money', {})
             money_percentages = entry.get('money_percentages', {})
             entry_odds = entry.get('best_odds')
             entry_matchup_time = entry.get('matchup_time', 'N/A')
@@ -606,32 +611,29 @@ def highlight_betting_category(row):
         # If 'Betting Category' column is not present, return empty styles
         return styles
 
-
-    if decision_logic == '🔒 Sharp Money Play' and confidence_label == '🔒 Verified Sharp Play':
-        # Green for Verified Sharp Play
+    # Apply green for all sharp confidence labels
+    if confidence_label in ["🔥🔥 Extreme Sharp Play", "🔒 Verified Sharp Play", "💎 Strong Sharp", "📈 Medium Sharp", "📊 Slight Sharp"]:
         styles[betting_category_col_index] = 'background-color: #28a745; color: white;'
-    elif decision_logic == '🔒 Sharp Money Play' and confidence_label == '⚙️ Lean Sharp / Monitor':
-        # Blue for Lean Sharp / Monitor
-        styles[betting_category_col_index] = 'background-color: #007bff; color: white;'
-    elif decision_logic == '🤷‍♂️ No Signal' or decision_logic == 'Neutral':
-        # Grey for Neutral or No Signal
-        styles[betting_category_col_index] = 'background-color: #6c757d; color: white;'
-    elif decision_logic == '🚫 Public Trap (Fade)' or confidence_label == '⚠️ Public-lean bias' or confidence_label == '🚫 Public Trap (Fade)':
-        # Red for Public Trap (Fade) or Public-lean bias
+    # Apply red for all public/fade confidence labels
+    elif confidence_label in ["🚨 Strong Public", "⚠️ Public-lean bias", "⬇️ Slight Public"]:
         styles[betting_category_col_index] = 'background-color: #dc3545; color: white;'
+    # Apply grey for neutral/no signal, checking both confidence and decision logic if not covered by other confidence labels
+    elif confidence_label == "⚖️ Neutral" or decision_logic == '🤷‍♂️ No Signal' or decision_logic == 'Neutral':
+        styles[betting_category_col_index] = 'background-color: #6c757d; color: white;'
 
     return styles
 
 # Define a function to apply color highlights to Decision Logic and Confidence Score Label (tuned for dark mode)
 def color_logic_labels(val):
     if isinstance(val, str):
-        if '🔒 Sharp Money Play' in val or '🔒 Verified Sharp Play' in val:
+        # Green for sharp signals
+        if val in ['🔒 Sharp Money Play', '🔒 Verified Sharp Play', '🔥🔥 Extreme Sharp Play', '💎 Strong Sharp', '📈 Medium Sharp', '📊 Slight Sharp']:
             return 'background-color: #28a745; color: white;' # Greenish for sharp/verified sharp
-        elif '⚙️ Lean Sharp / Monitor' in val:
-             return 'background-color: #ffc107; color: black;' # Yellowish for lean/monitor
-        elif '🚫 Public Trap (Fade)' in val or '⚠️ Public-lean bias' in val:
+        # Red for public/fade signals
+        elif val in ['🚫 Public Trap (Fade)', '⚠️ Public-lean bias', '⬇️ Slight Public', '🚨 Strong Public']:
             return 'background-color: #dc3545; color: white;' # Reddish for fade/public bias
-        elif '🤷‍♂️ No Signal' in val:
+        # Gray for no signal/neutral
+        elif val in ['🤷‍♂️ No Signal', 'Neutral', '⚖️ Neutral']:
             return 'background-color: #6c757d; color: white;' # Grayish for no signal
     return '' # No highlight for other values
 
@@ -656,8 +658,6 @@ if not df_picks_filtered.empty:
         if selected_decision_logic_filter == 'High Confidence':
             df_filtered_by_time_and_thresholds = df_picks_filtered[
                 (df_picks_filtered['Decision Logic'] == '🔒 Sharp Money Play') &
-                ((df_picks_filtered['Confidence Score Label'] == '⚙️ Lean Sharp / Monitor') |
-                 (df_picks_filtered['Confidence Score Label'] == '🔒 Verified Sharp Play')) &
                 (df_picks_filtered['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
                 (df_picks_filtered['Matchup Time'] >= start_time_pst) & # Filter from 15 minutes ago
                 (df_picks_filtered['Matchup Time'] <= end_time_pst)
