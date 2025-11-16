@@ -505,11 +505,14 @@ def fetch_and_process_data(sport):
         df_picks_meeting_thresholds['Disagreement Index'] = df_picks_meeting_thresholds[['Bets %', 'Money %']].min(axis=1)
         df_picks_meeting_thresholds['Consensus Strength'] = df_picks_meeting_thresholds[['Bets %', 'Money %']].max(axis=1)
         df_picks_meeting_thresholds['Weighted Signal'] = df_picks_meeting_thresholds['est_handle'] * df_picks_meeting_thresholds['Disagreement Index'] * df_picks_meeting_thresholds['Consensus Strength'] / 1_000_000
-        df_picks_meeting_thresholds['Decision Logic'] = df_picks_meeting_thresholds['Relative Differential'].apply(get_decision_label)
+        
+        # Calculate Relative Differential BEFORE Decision Logic
         df_picks_meeting_thresholds['Relative Differential'] = df_picks_meeting_thresholds.apply(
             lambda row: row['Actual Diff %'] * row['Bets %'] / 100 if row['Bets %'] is not None else None,
             axis=1
         )
+        df_picks_meeting_thresholds['Decision Logic'] = df_picks_meeting_thresholds['Relative Differential'].apply(get_decision_label)
+
         df_picks_meeting_thresholds['Confidence Score'] = (0.45 * df_picks_meeting_thresholds['Relative Differential']) + \
                                                           (0.35 * df_picks_meeting_thresholds['Actual Diff %']) + \
                                                           (0.15 * df_picks_meeting_thresholds['Weighted Signal'] * 100) - \
@@ -728,7 +731,7 @@ if not df_picks_filtered.empty:
                 st.write(f"No Spread picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
 
             st.subheader(f"Total Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria (including games started in the last 15 minutes)")
-            df_total_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Total'].copy()
+            df_total_picks = df_filtered_by_time_and_thresholds[df_total_picks['Betting Category'] == 'Total'].copy()
             if not df_total_picks.empty:
                  styled_total_df = df_total_picks.style.apply(highlight_betting_category, axis=1)
                  styled_total_df = styled_total_df.applymap(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
