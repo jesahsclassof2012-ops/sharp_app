@@ -288,8 +288,9 @@ def fetch_and_process_data(sport):
                          current_odds = entry_odds
                          current_matchup_time = entry_matchup_time
 
-                         spread_line_match1 = re.search(r'([\+\-]?\d+\.)', team1_name_raw)
-                         spread_line_match2 = re.search(r'([\+\-]?\d+\.)', team2_name_raw)
+                         # Updated regex to capture both decimal and integer spread values
+                         spread_line_match1 = re.search(r'([\+\-]?\d+(\.\d+)?)', team1_name_raw)
+                         spread_line_match2 = re.search(r'([\+\-]?\d+(\.\d+)?)', team2_name_raw)
                          if spread_line_match1 and spread_line_match2:
                              spread_line = f"{spread_line_match1.group(1)} / {spread_line_match2.group(1)}"
 
