@@ -16,6 +16,8 @@ class DataQualityFlags:
     missing_total: bool = False
     invalid_percentage: bool = False
     invalid_odds: bool = False
+    invalid_spread: bool = False
+    invalid_total: bool = False
     missing_percentage: bool = False
     
     def has_issues(self) -> bool:
@@ -26,6 +28,8 @@ class DataQualityFlags:
             self.missing_total,
             self.invalid_percentage,
             self.invalid_odds,
+            self.invalid_spread,
+            self.invalid_total,
             self.missing_percentage
         ])
 
