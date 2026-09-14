@@ -281,6 +281,22 @@ def compare_lines(
     return "No Material Movement", movement
 
 
+def compare_total_lines(
+    current_total: Optional[float], consensus_total: Optional[float], side: str
+) -> Tuple[str, float]:
+    """Compare a total line from the selected Over/Under bettor's perspective."""
+    if current_total is None or consensus_total is None or side not in {"over", "under"}:
+        return "N/A", 0.0
+    movement = current_total - consensus_total
+    favorable = movement < -0.25 if side == "over" else movement > 0.25
+    unfavorable = movement > 0.25 if side == "over" else movement < -0.25
+    if favorable:
+        return f"Better for {side.title()}", movement
+    if unfavorable:
+        return f"Worse for {side.title()}", movement
+    return "No Material Movement", movement
+
+
 def validate_percentages(pct1: Optional[float], pct2: Optional[float]) -> DataQualityFlags:
     """
     Validate that percentages are reasonable.

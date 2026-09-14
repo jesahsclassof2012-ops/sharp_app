@@ -12,6 +12,7 @@ from sharp_core import (
     impute_missing_percentage,
     calculate_money_minus_bets_screen,
     compare_lines,
+    compare_total_lines,
     validate_percentages,
     DataQualityFlags,
 )
@@ -460,13 +461,36 @@ class TestDataQualityFlags:
         """Test has_issues returns True when malformed flag set."""
         flags = DataQualityFlags(malformed_team_code=True)
         assert flags.has_issues()
-    
+
     def test_has_issues_true_missing_spread(self):
-        """Test has_issues returns True when missing_spread flag set."""
         flags = DataQualityFlags(missing_spread=True)
         assert flags.has_issues()
-    
+
     def test_has_issues_true_invalid_odds(self):
-        """Test has_issues returns True when invalid_odds flag set."""
         flags = DataQualityFlags(invalid_odds=True)
         assert flags.has_issues()
+
+
+@pytest.mark.parametrize("code", ["UTSA", "TXST", "MSST", "MINN", "SJSU", "PITT", "M-OH"])
+def test_supported_scoresandodds_team_codes(code):
+    parsed, flags = parse_team_code(code)
+    assert parsed == code
+    assert not flags.malformed_team_code
+
+
+def test_bettor_favorable_spread_movement():
+    label, movement = compare_lines((-4.5, 4.5), (-5.5, 5.5), "away")
+    assert label == "Better for Away"
+    assert movement == 1.0
+
+
+def test_bettor_favorable_total_movement_for_over():
+    label, movement = compare_total_lines(45.5, 47.0, "over")
+    assert label == "Better for Over"
+    assert movement == -1.5
+
+
+def test_bettor_favorable_total_movement_for_under():
+    label, movement = compare_total_lines(47.0, 45.5, "under")
+    assert label == "Better for Under"
+    assert movement == 1.5
