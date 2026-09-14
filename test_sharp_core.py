@@ -123,6 +123,12 @@ class TestParseSpread:
         assert spread is None
         assert flags.missing_spread
 
+    @pytest.mark.parametrize("value", ["PK / PK", "PICK / PICK", "PICK'EM / PICK'EM"])
+    def test_pickem_spread(self, value):
+        spread, flags = parse_spread(value)
+        assert spread == (0.0, 0.0)
+        assert not flags.has_issues()
+
 
 class TestParseTotal:
     """Test total/over-under parsing."""
@@ -201,6 +207,12 @@ class TestParseAmericanOdds:
         """Test even money odds."""
         odds, flags = parse_american_odds("-100")
         assert odds == -100
+        assert not flags.invalid_odds
+
+    @pytest.mark.parametrize("value", ["even", "EVEN", "ev", "EV"])
+    def test_text_even_money_odds(self, value):
+        odds, flags = parse_american_odds(value)
+        assert odds == 100
         assert not flags.invalid_odds
     
     def test_odds_with_suffix(self):
@@ -379,7 +391,7 @@ class TestCompareLines:
         current = (-5.0, 5.0)
         consensus = (-6.0, 6.0)
         label, movement = compare_lines(current, consensus, 'home')
-        assert "Better for Home" in label
+        assert "Worse for Home" in label
         assert movement == -1.0
     
     def test_worse_home_line(self):
@@ -387,7 +399,7 @@ class TestCompareLines:
         current = (-7.0, 7.0)
         consensus = (-6.0, 6.0)
         label, movement = compare_lines(current, consensus, 'home')
-        assert "Worse for Home" in label
+        assert "Better for Home" in label
         assert movement == 1.0
     
     def test_no_material_movement_away(self):

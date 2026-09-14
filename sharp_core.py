@@ -19,6 +19,7 @@ class DataQualityFlags:
     invalid_spread: bool = False
     invalid_total: bool = False
     missing_percentage: bool = False
+    missing_matchup: bool = False
     
     def has_issues(self) -> bool:
         """Returns True if any quality flags are set."""
@@ -30,7 +31,8 @@ class DataQualityFlags:
             self.invalid_odds,
             self.invalid_spread,
             self.invalid_total,
-            self.missing_percentage
+            self.missing_percentage,
+            self.missing_matchup,
         ])
 
 
@@ -84,8 +86,9 @@ def parse_spread(spread_str: str) -> Tuple[Optional[Tuple[float, float]], DataQu
         flags.missing_spread = True
         return None, flags
     
-    # Try to extract two numbers with +/- signs
-    matches = re.findall(r'([\+\-]?\d+(?:\.\d+)?)', str(spread_str))
+    # ScoresAndOdds uses PK, PICK, and PICK'EM for a pick'em spread.
+    normalized = re.sub(r"\b(?:PICK'EM|PICK|PK)\b", "0", str(spread_str), flags=re.IGNORECASE)
+    matches = re.findall(r'([\+\-]?\d+(?:\.\d+)?)', normalized)
     
     if len(matches) >= 2:
         try:
@@ -146,6 +149,9 @@ def parse_american_odds(odds_str: str) -> Tuple[Optional[int], DataQualityFlags]
         flags.invalid_odds = True
         return None, flags
     
+    if str(odds_str).strip().lower() in {"even", "ev"}:
+        return 100, flags
+
     # Extract number with optional +/- sign
     match = re.search(r'([\+\-]?\d+)', str(odds_str))
     
@@ -266,18 +272,12 @@ def compare_lines(
     consensus = consensus_spread[side_idx]
     movement = current - consensus
     
-    if side == 'away':
-        # Better if more positive (higher underdog odds or lower spread)
-        if movement > 0.25:
-            return "Better for Away", movement
-        elif movement < -0.25:
-            return "Worse for Away", movement
-    else:
-        # Better if more negative (lower home spread or higher underdog odds)
-        if movement < -0.25:
-            return "Better for Home", movement
-        elif movement > 0.25:
-            return "Worse for Home", movement
+    # For either side, the numerically higher spread is bettor-favorable:
+    # -5.5 beats -6, just as +6 beats +5.5.
+    if movement > 0.25:
+        return f"Better for {side.title()}", movement
+    if movement < -0.25:
+        return f"Worse for {side.title()}", movement
     
     return "No Material Movement", movement
 

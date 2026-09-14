@@ -17,8 +17,11 @@ import streamlit as st
 from bs4 import BeautifulSoup, Tag
 
 from sharp_core import (
+    DataQualityFlags,
     american_odds_to_break_even_probability,
     calculate_money_minus_bets_screen,
+    compare_lines,
+    compare_total_lines,
     impute_missing_percentage,
     parse_american_odds,
     parse_spread,
@@ -132,8 +135,34 @@ def quality_text(*flags: Any) -> str:
 
 def line_number(value: Optional[str]) -> Optional[float]:
     """Extract the numeric portion of one spread or total line."""
+    if (value or "").strip().upper() in {"PK", "PICK", "PICK'EM"}:
+        return 0.0
     match = re.search(r"(?:[ou]\s*)?([+-]?\d+(?:\.\d+)?)", value or "", re.I)
     return float(match.group(1)) if match else None
+
+
+def line_vs_split_label(market: str, best_line: Optional[str], split: Optional[str], side: str) -> str:
+    """Describe the executable line from the selected bettor's perspective."""
+    if not best_line or not split or split == "N/A":
+        return "N/A"
+    if market == "Spread":
+        consensus, _ = parse_spread(split)
+        best_value = line_number(best_line)
+        if not consensus or best_value is None:
+            return "N/A"
+        index = 0 if side == "away" else 1
+        current = (best_value, 0.0) if index == 0 else (0.0, best_value)
+        label, movement = compare_lines(current, consensus, side)
+    elif market == "Total":
+        best_value, _ = parse_total(best_line)
+        split_value, _ = parse_total("o" + split)
+        label, movement = compare_total_lines(best_value, split_value, side)
+    else:
+        return "N/A"
+    if label == "N/A":
+        return label
+    direction = "Better" if label.startswith("Better") else "Worse" if label.startswith("Worse") else "Same"
+    return f"{direction} ({movement:+g})"
 
 
 def parse_scoresandodds_html(html: str, refreshed_at: datetime) -> pd.DataFrame:
@@ -161,6 +190,7 @@ def parse_scoresandodds_html(html: str, refreshed_at: datetime) -> pd.DataFrame:
         matchup = matchup_node.get_text(" ", strip=True) if matchup_node else " vs ".join(event_teams or [c for c in codes if c])
         if not matchup:
             matchup = "Unidentified matchup"
+            card_flags.append(DataQualityFlags(missing_matchup=True))
 
         percentage_groups = chart.select(".trend-graph-percentage")
         def pair(index: int) -> tuple[Optional[float], Optional[float]]:
@@ -186,19 +216,7 @@ def parse_scoresandodds_html(html: str, refreshed_at: datetime) -> pd.DataFrame:
             # A readable observation, not an inferred probability or rating.
             signal = "Money exceeds bets" if gap is not None and gap > 0 else "Bets exceed money" if gap is not None and gap < 0 else "Unavailable"
             break_even = american_odds_to_break_even_probability(best_price)
-            line_vs_split = "N/A"
-            if best_line and current_split:
-                if market == "Total":
-                    best_total, _ = parse_total(best_line)
-                    split_total, _ = parse_total("o" + current_split)
-                    if best_total is not None and split_total is not None:
-                        line_vs_split = f"{best_total - split_total:+g}"
-                elif market == "Spread":
-                    split_spread, _ = parse_spread(current_split)
-                    side = 0 if quote_key == "away" else 1
-                    best_value = line_number(best_line)
-                    if best_value is not None and split_spread:
-                        line_vs_split = f"{best_value - split_spread[side]:+g}"
+            line_vs_split = line_vs_split_label(market, best_line, current_split, quote_key)
             rows.append({
                 "Matchup": matchup, "Start time": format_start(card), "Market": market,
                 "Selection": selection, "Bets %": bets, "Money %": money,
@@ -213,13 +231,14 @@ def parse_scoresandodds_html(html: str, refreshed_at: datetime) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_data(sport: str, refreshed_at_iso: str) -> pd.DataFrame:
+def fetch_data(sport: str) -> pd.DataFrame:
+    """Fetch source data once per sport/TTL; filters must not bust this cache."""
     response = requests.get(
         f"https://www.scoresandodds.com/{sport.lower()}/consensus-picks",
         headers={"User-Agent": "Mozilla/5.0"}, timeout=20,
     )
     response.raise_for_status()
-    return parse_scoresandodds_html(response.text, datetime.fromisoformat(refreshed_at_iso))
+    return parse_scoresandodds_html(response.text, datetime.now(timezone.utc))
 
 
 def add_session_movement(data: pd.DataFrame) -> pd.DataFrame:
@@ -250,9 +269,8 @@ def main() -> None:
     require_price = st.sidebar.checkbox("Require current best price", value=True)
     if st.sidebar.button("Refresh"):
         fetch_data.clear()
-    refreshed_at = datetime.now(timezone.utc)
     try:
-        data = fetch_data(sport, refreshed_at.isoformat())
+        data = fetch_data(sport)
     except requests.RequestException as exc:
         st.error(f"Could not load ScoresAndOdds: {exc}")
         return

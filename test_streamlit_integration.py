@@ -1,6 +1,7 @@
 """Integration coverage for the live Sharp Signal V2 parser."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import streamlit_app
 
@@ -45,7 +46,7 @@ def test_spread_and_hyphenated_code_are_current_card_identity():
     assert data.loc[0, "Split line"] == "3.5 / -3.5"
     assert data.loc[0, "Best line"] == "+4"
     assert data.loc[0, "Best price"] == -110
-    assert data.loc[0, "Line vs split"] == "+0.5"
+    assert data.loc[0, "Line vs split"] == "Better (+0.5)"
 
 
 def test_total_uses_best_over_and_under_not_away_home_prices():
@@ -64,3 +65,55 @@ def test_total_uses_best_over_and_under_not_away_home_prices():
     assert list(data["Best line"]) == ["o46", "u46"]
     assert list(data["Split line"]) == ["45.5", "45.5"]
     assert list(data["Matchup"]) == ["UTSA vs TXST", "UTSA vs TXST"]
+
+
+def test_captured_scoresandodds_cards_keep_event_identity_and_quotes():
+    """Regression fixture mirrors current nested trend-card/event-header markup."""
+    html = (Path(__file__).parent / "tests" / "fixtures" / "scoresandodds_trend_cards.html").read_text()
+    data = streamlit_app.parse_scoresandodds_html(html, datetime.now(timezone.utc))
+    assert set(data.loc[data["Market"] == "Moneyline", "Matchup"]) == {"Southern Miss vs Auburn"}
+    assert set(data.loc[data["Market"] == "Spread", "Matchup"]) == {"Southern Miss vs Auburn"}
+    totals = data[data["Market"] == "Total"]
+    assert set(totals["Matchup"]) == {"Southern Miss vs Auburn", "Cal Poly vs San Jose State"}
+    assert "Unidentified matchup" not in set(totals["Matchup"])
+    assert totals.groupby("Matchup").size().to_dict() == {
+        "Southern Miss vs Auburn": 2, "Cal Poly vs San Jose State": 2,
+    }
+    assert data.loc[(data["Market"] == "Spread") & (data["Selection"] == "AUB"), "Best price"].item() == 100
+    assert set(data.loc[data["Market"] == "Spread", "Line vs split"]) == {"Better (+1)"}
+    assert set(totals["Best price"]) >= {100, -109, -115, -108}
+
+
+def test_missing_event_identity_is_a_data_quality_issue():
+    html = '''<div class="trend-card"><span class="trend-graph-chart">
+      <span class="trend-graph-sides"><strong>Over (o45.5)</strong><span>% of Bets</span><strong>Under (u45.5)</strong></span>
+      <span class="trend-graph-percentage"><span>49%</span><span>51%</span></span>
+      <span class="trend-graph-percentage"><span>56%</span><span>44%</span></span>
+    </span></div>'''
+    data = streamlit_app.parse_scoresandodds_html(html, datetime.now(timezone.utc))
+    assert set(data["Matchup"]) == {"Unidentified matchup"}
+    assert data["Data quality"].str.contains("missing matchup").all()
+
+
+def test_fetch_data_cache_keeps_actual_fetch_timestamp(monkeypatch):
+    calls = []
+
+    class Response:
+        text = '''<div class="trend-card"><div class="event-header"><span class="team-name">UTSA</span><span class="team-name">TXST</span></div><span class="trend-graph-chart"><span class="trend-graph-sides"><strong>UTSA</strong><span>% of Bets</span><strong>TXST</strong></span><span class="trend-graph-percentage"><span>40%</span><span>60%</span></span><span class="trend-graph-percentage"><span>60%</span><span>40%</span></span></span></div>'''
+        def raise_for_status(self):
+            return None
+
+    def fake_get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return Response()
+
+    streamlit_app.fetch_data.clear()
+    monkeypatch.setattr(streamlit_app.requests, "get", fake_get)
+    first = streamlit_app.fetch_data("CACHE-TEST")
+    second = streamlit_app.fetch_data("CACHE-TEST")
+    assert len(calls) == 1
+    assert first.loc[0, "Last refresh time"] == second.loc[0, "Last refresh time"]
+    streamlit_app.fetch_data.clear()
+    streamlit_app.fetch_data("CACHE-TEST")
+    assert len(calls) == 2
+    streamlit_app.fetch_data.clear()
