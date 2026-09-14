@@ -228,8 +228,9 @@ def calculate_money_minus_bets_screen(
     
     diff = money_pct - bets_pct
     
-    # Check ticket share (how concentrated on one side)
-    ticket_share = max(money_pct, bets_pct)
+    # Ticket share is Bets %, not the larger of Bets % and Money %.  Money % is
+    # intentionally allowed to be higher: that is the split this screen shows.
+    ticket_share = bets_pct
     
     if max_ticket_share is not None:
         passes = abs(diff) > 0 and ticket_share <= max_ticket_share

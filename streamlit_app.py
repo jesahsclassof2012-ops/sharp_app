@@ -260,7 +260,7 @@ def main() -> None:
         st.info("No consensus cards were available for this sport.")
         return
     now = datetime.now(PACIFIC)
-    data = data[(data["Money minus Bets gap"].fillna(-999) >= min_gap) & (data[["Bets %", "Money %"]].max(axis=1) <= max_tickets)]
+    data = data[(data["Money minus Bets gap"].fillna(-999) >= min_gap) & (data["Bets %"].fillna(101) <= max_tickets)]
     if market != "All":
         data = data[data["Market"] == market]
     data = data[data["Start time"].isna() | ((data["Start time"] >= now) & (data["Start time"] <= now + timedelta(hours=hours)))]

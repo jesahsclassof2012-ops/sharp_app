@@ -331,10 +331,16 @@ class TestMoneyMinusBetsScreen:
     
     def test_with_ticket_share_limit_exceeded(self):
         """Test with ticket share exceeding limit."""
-        # Should fail: diff exists but ticket share exceeds limit
+        # Should fail: Bets %, rather than Money %, exceeds the ticket limit.
+        diff, passes = calculate_money_minus_bets_screen(65.0, 80.0, max_ticket_share=70.0)
+        assert diff == -15.0
+        assert passes is False
+
+    def test_money_share_can_exceed_ticket_share_limit(self):
+        """A large money share is the signal, not a reason to reject the row."""
         diff, passes = calculate_money_minus_bets_screen(80.0, 60.0, max_ticket_share=70.0)
         assert diff == 20.0
-        assert passes is False
+        assert passes is True
     
     def test_missing_money_percentage(self):
         """Test handling of missing money percentage."""
