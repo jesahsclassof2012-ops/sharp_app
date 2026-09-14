@@ -7,6 +7,8 @@ turn them into a prediction, confidence score, or betting recommendation.
 from __future__ import annotations
 
 import re
+import csv
+import io
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -29,6 +31,7 @@ from sharp_core import (
     parse_total,
     validate_percentages,
 )
+from history_store import HistoryStore, bucket_performance, performance
 
 
 SPORTS = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
@@ -227,7 +230,7 @@ def parse_scoresandodds_html(html: str, refreshed_at: datetime) -> pd.DataFrame:
             line_vs_split = line_vs_split_label(market, best_line, current_split, quote_key)
             rows.append({
                 "Matchup": matchup, "Start time": format_start(card), "Market": market,
-                "Selection": selection, "Bets %": bets, "Money %": money,
+                "Selection": selection, "Selection side": quote_key, "Bets %": bets, "Money %": money,
                 "Money minus Bets gap": gap, "Signal": signal, "Split line": current_split or "N/A",
                 "Best line": best_line or "N/A", "Best price": best_price,
                 "Break-even %": round(break_even * 100, 2) if break_even is not None else None,
@@ -235,7 +238,7 @@ def parse_scoresandodds_html(html: str, refreshed_at: datetime) -> pd.DataFrame:
                 "Data quality": quality_text(*card_flags, percentage_flags, money_flags, odds_flags),
                 "Last refresh time": refreshed_at.astimezone(PACIFIC),
             })
-    return pd.DataFrame(rows, columns=DISPLAY_COLUMNS)
+    return pd.DataFrame(rows, columns=DISPLAY_COLUMNS + ["Selection side"])
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -263,6 +266,36 @@ def add_session_movement(data: pd.DataFrame) -> pd.DataFrame:
     data = data.copy()
     data["Session movement"] = movement
     return data
+
+
+def render_history() -> None:
+    """Persistent-history view; conclusions stay descriptive at small samples."""
+    st.divider()
+    st.header("History / Performance")
+    store = HistoryStore()
+    snapshots = store.snapshots()
+    rows = store.analytics_rows()
+    metrics = performance(rows)
+    st.caption("Persistent database history. Small samples are not evidence of a profitable strategy.")
+    columns = st.columns(6)
+    for column, label, value in zip(columns, ("Stored snapshots", "Settled observations", "Win rate", "ROI", "Units", "Average CLV"), (len(snapshots), metrics["settled"], metrics["win_rate"], metrics["roi"], metrics["units"], metrics["average_clv"])):
+        if label in {"Win rate", "ROI"}:
+            column.metric(label, "N/A" if value is None else f"{value:.1%}")
+        else:
+            column.metric(label, "N/A" if value is None else f"{value:.3f}" if isinstance(value, float) else value)
+    if metrics["settled"] < 30:
+        st.info("Insufficient sample size: fewer than 30 settled observations.")
+    for title, field in (("Performance by Money minus Bets gap", "money_minus_bets_gap"), ("Performance by sport", "sport"), ("Performance by market", "market")):
+        summary = bucket_performance(rows, field)
+        st.subheader(title)
+        st.dataframe(pd.DataFrame.from_dict(summary, orient="index"), use_container_width=True)
+    for label, records in (("Export snapshots CSV", snapshots), ("Export settled results CSV", rows)):
+        output = io.StringIO()
+        if records:
+            writer = csv.DictWriter(output, fieldnames=sorted({key for row in records for key in row}))
+            writer.writeheader()
+            writer.writerows(records)
+        st.download_button(label, output.getvalue(), file_name=label.lower().replace(" ", "_") + ".csv", mime="text/csv")
 
 
 def main() -> None:
@@ -294,10 +327,11 @@ def main() -> None:
         data = data[data["Best price"].notna()]
     data = add_session_movement(data).sort_values(["Start time", "Money minus Bets gap"], ascending=[True, False])
     st.caption("Session movement compares this browser session only; it is not persistent historical backtesting.")
-    st.dataframe(data, use_container_width=True, hide_index=True, column_config={
+    st.dataframe(data[DISPLAY_COLUMNS + ["Session movement"]], use_container_width=True, hide_index=True, column_config={
         "Start time": st.column_config.DatetimeColumn(format="MMM D, h:mm a"),
         "Last refresh time": st.column_config.DatetimeColumn(format="MMM D, h:mm:ss a"),
     })
+    render_history()
 
 
 if __name__ == "__main__":
