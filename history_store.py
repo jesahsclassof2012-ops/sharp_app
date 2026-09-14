@@ -141,6 +141,9 @@ class HistoryStore:
         ident = "BIGSERIAL PRIMARY KEY" if self.is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
         self.execute(f"CREATE TABLE IF NOT EXISTS snapshots (id {ident}, game_key TEXT NOT NULL, signal_key TEXT NOT NULL, observed_at_utc TEXT NOT NULL, sport TEXT NOT NULL, matchup TEXT NOT NULL, event_start_utc TEXT NOT NULL, market TEXT NOT NULL, selection TEXT NOT NULL, selection_side TEXT, split_line TEXT, bets_pct REAL, money_pct REAL, money_minus_bets_gap REAL, best_line TEXT, best_price INTEGER, break_even_pct REAL, data_quality TEXT, line_vs_split TEXT, UNIQUE(signal_key,observed_at_utc))")
         self.execute(f"CREATE TABLE IF NOT EXISTS results (id {ident}, game_key TEXT NOT NULL UNIQUE, sport TEXT NOT NULL, matchup TEXT NOT NULL, event_start_utc TEXT NOT NULL, away_score INTEGER NOT NULL, home_score INTEGER NOT NULL, settled_at_utc TEXT NOT NULL)")
+        for column, definition in (("result_source","TEXT"),("external_event_id","TEXT"),("source_status","TEXT"),("result_fetched_at_utc","TEXT")):
+            try: self.execute(f"ALTER TABLE results ADD COLUMN {column} {definition}")
+            except Exception: pass
         self.connection.commit()
 
     def insert_snapshot(self, item: dict[str, Any]) -> bool:
@@ -150,9 +153,9 @@ class HistoryStore:
         values = [game,signal,item["observed_at_utc"],item["sport"],item["matchup"],start] + [item.get(name) for name in fields[6:]]
         cur=self.execute(f"INSERT INTO snapshots ({','.join(fields)}) VALUES ({','.join([self.p]*len(fields))}) ON CONFLICT(signal_key,observed_at_utc) DO NOTHING",values); self.connection.commit(); return cur.rowcount > 0
     def insert_snapshots(self, items: Iterable[dict[str, Any]]) -> int: return sum(self.insert_snapshot(item) for item in items)
-    def record_game_result(self, sport:str, matchup:str, event_start_utc:Any, away_score:int, home_score:int, settled_at_utc:Optional[str]=None) -> None:
+    def record_game_result(self, sport:str, matchup:str, event_start_utc:Any, away_score:int, home_score:int, settled_at_utc:Optional[str]=None, result_source=None, external_event_id=None, source_status=None) -> None:
         start=normalize_utc(event_start_utc); game=game_key(sport,matchup,start)
-        self.execute(f"INSERT INTO results (game_key,sport,matchup,event_start_utc,away_score,home_score,settled_at_utc) VALUES ({','.join([self.p]*7)}) ON CONFLICT(game_key) DO UPDATE SET away_score=excluded.away_score,home_score=excluded.home_score,settled_at_utc=excluded.settled_at_utc",(game,sport,matchup,start,away_score,home_score,settled_at_utc or datetime.now(timezone.utc).isoformat())); self.connection.commit()
+        now=datetime.now(timezone.utc).isoformat(); self.execute(f"INSERT INTO results (game_key,sport,matchup,event_start_utc,away_score,home_score,settled_at_utc,result_source,external_event_id,source_status,result_fetched_at_utc) VALUES ({','.join([self.p]*11)}) ON CONFLICT(game_key) DO UPDATE SET away_score=excluded.away_score,home_score=excluded.home_score,settled_at_utc=excluded.settled_at_utc,result_source=excluded.result_source,external_event_id=excluded.external_event_id,source_status=excluded.source_status,result_fetched_at_utc=excluded.result_fetched_at_utc",(game,sport,matchup,start,away_score,home_score,settled_at_utc or now,result_source,external_event_id,source_status,now)); self.connection.commit()
     def snapshots(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM snapshots ORDER BY observed_at_utc"))
     def results(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM results"))
     def signal_snapshots(self, signal:str) -> list[dict[str,Any]]: return [x for x in self.snapshots() if x["signal_key"]==signal and is_valid_pregame(x)]
