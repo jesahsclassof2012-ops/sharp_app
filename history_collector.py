@@ -18,11 +18,14 @@ def collect_sport(store: HistoryStore, sport: str) -> int:
     data = parse_scoresandodds_html(response.text, observed_at)
     snapshots = []
     for _, row in data.iterrows():
-        start = row["Start time"].astimezone(timezone.utc).isoformat() if row["Start time"] is not None else None
+        if row["Start time"] is None:
+            continue  # A missing kickoff time can never safely become pregame history.
+        start = row["Start time"].astimezone(timezone.utc).isoformat()
+        if observed_at >= datetime.fromisoformat(start):
+            continue  # Never collect in-game or postgame rows as pregame observations.
         selection = row["Selection"]
         side = row["Selection side"]
         snapshot = {"observed_at_utc": observed_at.isoformat(), "sport": sport, "matchup": row["Matchup"], "event_start_utc": start, "market": row["Market"], "selection": selection, "selection_side": side, "split_line": row["Split line"], "bets_pct": row["Bets %"], "money_pct": row["Money %"], "money_minus_bets_gap": row["Money minus Bets gap"], "best_line": row["Best line"], "best_price": row["Best price"], "break_even_pct": row["Break-even %"], "data_quality": row["Data quality"]}
-        snapshot["event_key"] = event_key(sport, snapshot["matchup"], start, snapshot["market"], selection)
         snapshots.append(snapshot)
     return store.insert_snapshots(snapshots)
 

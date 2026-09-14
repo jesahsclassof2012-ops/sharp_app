@@ -13,6 +13,11 @@ repository secret named `DATABASE_URL` containing a PostgreSQL connection URL.
 It intentionally fails in Actions when that secret is absent so production
 history is never silently written to ephemeral runner storage.
 
+Configure the same `DATABASE_URL` in both GitHub Actions repository secrets and
+Streamlit Community Cloud app secrets/environment. In deployed Streamlit, the
+History section shows a configuration warning when it is absent; the live
+scanner remains available. SQLite fallback is only for local development.
+
 Results are recorded through `HistoryStore.record_result(...)` using actual
 captured snapshot lines. Automated score ingestion is intentionally not enabled
 yet because this repository has no verified results-data source configured.

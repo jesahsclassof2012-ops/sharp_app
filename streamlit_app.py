@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import csv
 import io
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -272,20 +273,26 @@ def render_history() -> None:
     """Persistent-history view; conclusions stay descriptive at small samples."""
     st.divider()
     st.header("History / Performance")
+    if not os.getenv("DATABASE_URL") and (os.getenv("STREAMLIT_SHARING_MODE") or os.getenv("STREAMLIT_CLOUD")):
+        st.warning("History unavailable: configure DATABASE_URL in Streamlit Community Cloud secrets. The live scanner remains available.")
+        return
     store = HistoryStore()
     snapshots = store.snapshots()
     rows = store.analytics_rows()
     metrics = performance(rows)
     st.caption("Persistent database history. Small samples are not evidence of a profitable strategy.")
-    columns = st.columns(6)
-    for column, label, value in zip(columns, ("Stored snapshots", "Settled observations", "Win rate", "ROI", "Units", "Average CLV"), (len(snapshots), metrics["settled"], metrics["win_rate"], metrics["roi"], metrics["units"], metrics["average_clv"])):
+    columns = st.columns(5)
+    for column, label, value in zip(columns, ("Stored observations", "Unique settled baseline signals", "Wins", "Losses", "Pushes"), (len(snapshots), metrics["settled"], metrics["wins"], metrics["losses"], metrics["pushes"])):
+        column.metric(label, value)
+    columns = st.columns(5)
+    for column, label, value in zip(columns, ("Win rate", "Units", "ROI", "Average CLV", "Positive CLV rate"), (metrics["win_rate"], metrics["units"], metrics["roi"], metrics["average_clv"], metrics["positive_clv_rate"])):
         if label in {"Win rate", "ROI"}:
             column.metric(label, "N/A" if value is None else f"{value:.1%}")
         else:
             column.metric(label, "N/A" if value is None else f"{value:.3f}" if isinstance(value, float) else value)
     if metrics["settled"] < 30:
         st.info("Insufficient sample size: fewer than 30 settled observations.")
-    for title, field in (("Performance by Money minus Bets gap", "money_minus_bets_gap"), ("Performance by sport", "sport"), ("Performance by market", "market")):
+    for title, field in (("Performance by Money minus Bets gap", "money_minus_bets_gap"), ("Performance by sport", "sport"), ("Performance by market", "market"), ("Performance by ticket share", "bets_pct"), ("Performance by line vs split", "line_vs_split"), ("Performance by price range", "best_price")):
         summary = bucket_performance(rows, field)
         st.subheader(title)
         st.dataframe(pd.DataFrame.from_dict(summary, orient="index"), use_container_width=True)

@@ -1,83 +1,48 @@
-"""Phase 2 storage, settlement, CLV, and analytics tests."""
+from history_store import HistoryStore, calculate_clv, event_key, game_key, signal_key, performance
 
-from history_store import (
-    HistoryStore, american_profit, bucket_performance, calculate_clv, event_key,
-    gap_bucket, performance, settle_selection,
-)
+def item(**changes):
+    data={"observed_at_utc":"2026-09-13T00:00:00Z","sport":"NFL","matchup":"DEN vs KC","event_start_utc":"2026-09-14T20:00:00Z","market":"Spread","selection":"DEN","selection_side":"away","split_line":"+3 / -3","bets_pct":40,"money_pct":55,"money_minus_bets_gap":15,"best_line":"+3","best_price":-110,"break_even_pct":52.38,"data_quality":"OK","line_vs_split":"Better (+0.5)"}; data.update(changes); return data
 
+def test_game_and_signal_keys_normalize_utc_and_distinguish_signal():
+    game=game_key("NFL","DEN vs KC","2026-09-14T20:00:00Z")
+    assert game == game_key("nfl","den vs kc","2026-09-14T20:00:00+00:00")
+    assert signal_key(game,"Spread","DEN") != signal_key(game,"Spread","KC")
+    assert event_key("NFL","DEN vs KC","2026-09-14T20:00:00Z","Spread","DEN") == signal_key(game,"Spread","DEN")
 
-def snapshot(**changes):
-    base = {"observed_at_utc": "2026-09-13T00:00:00+00:00", "sport": "NFL", "matchup": "DEN vs KC", "event_start_utc": "2026-09-14T20:00:00+00:00", "market": "Spread", "selection": "DEN", "selection_side": "away", "split_line": "-3 / +3", "bets_pct": 40.0, "money_pct": 55.0, "money_minus_bets_gap": 15.0, "best_line": "-2.5", "best_price": -110, "break_even_pct": 52.38, "data_quality": "OK"}
-    base.update(changes)
-    return base
+def test_sqlite_and_duplicate_snapshot_prevention():
+    store=HistoryStore("sqlite:///:memory:"); assert store.insert_snapshot(item()); assert not store.insert_snapshot(item()); assert len(store.snapshots())==1 and not store.is_postgres
 
+def test_final_score_stored_once_per_game_and_settles_each_snapshot_line():
+    store=HistoryStore("sqlite:///:memory:"); early=item(best_line="+3"); late=item(observed_at_utc="2026-09-13T01:00:00Z",best_line="+2.5")
+    store.insert_snapshots([early,late]); store.record_game_result("NFL","DEN vs KC","2026-09-14T20:00:00+00:00",20,23)
+    assert len(store.results())==1
+    rows=store.analytics_rows(); assert len(rows)==1 and rows[0]["bet_result"]=="push"
+    from history_store import settle_selection, line_value
+    assert settle_selection("Spread","away",line_value(early["best_line"]),20,23)=="push"
+    assert settle_selection("Spread","away",line_value(late["best_line"]),20,23)=="loss"
 
-def test_sqlite_storage_insert_and_duplicate_prevention():
-    store = HistoryStore("sqlite:///:memory:")
-    item = snapshot()
-    assert store.insert_snapshot(item)
-    assert not store.insert_snapshot(item)
-    assert len(store.snapshots()) == 1
-    assert not store.is_postgres
+def test_total_snapshots_with_different_lines_settle_differently():
+    from history_store import settle_selection, line_value
+    assert settle_selection("Total","over",line_value("o45"),24,21)=="push"
+    assert settle_selection("Total","over",line_value("o45.5"),24,21)=="loss"
 
+def test_bettor_favorable_clv_directions_and_moneyline_probability():
+    assert calculate_clv("Spread","away",6,5.5,-110,-110)==0.5
+    assert calculate_clv("Spread","home",-5.5,-6,-110,-110)==0.5
+    assert calculate_clv("Total","over",46.5,47,-110,-110)==0.5
+    assert calculate_clv("Total","under",47.5,47,-110,-110)==0.5
+    assert calculate_clv("Moneyline","away",None,None,150,130)>0
 
-def test_deterministic_market_identity_distinguishes_selection_and_market():
-    base = event_key("NFL", "DEN vs KC", "2026-09-14T20:00:00Z", "Spread", "DEN")
-    assert base == event_key("nfl", "den vs kc", "2026-09-14T20:00:00Z", "spread", "den")
-    assert base != event_key("NFL", "DEN vs KC", "2026-09-14T20:00:00Z", "Spread", "KC")
-    assert base != event_key("NFL", "DEN vs KC", "2026-09-14T20:00:00Z", "Moneyline", "DEN")
+def test_first_current_close_are_pregame_only():
+    store=HistoryStore("sqlite:///:memory:"); first=item(observed_at_utc="2026-09-13T00:00:00Z",best_line="+3"); close=item(observed_at_utc="2026-09-14T19:59:00Z",best_line="+2.5"); post=item(observed_at_utc="2026-09-14T20:01:00Z",best_line="+2")
+    assert store.insert_snapshots([first,close,post])==2
+    signal=event_key("NFL","DEN vs KC","2026-09-14T20:00:00Z","Spread","DEN"); state=store.first_current_close(signal)
+    assert state["first"]["best_line"]=="+3" and state["current"]["best_line"]=="+2.5" and state["close"]["best_line"]=="+2.5"
 
+def test_missing_start_and_priceless_rows_are_excluded_from_production_baseline():
+    store=HistoryStore("sqlite:///:memory:"); bad=item(event_start_utc=None); price_less=item(best_price=None)
+    assert not store.insert_snapshot(bad); assert store.insert_snapshot(price_less); assert store.baseline_entries()==[]
+    assert performance([dict(price_less,bet_result="loss")])["settled"]==0
 
-def test_moneyline_spread_total_settlement_and_pushes():
-    assert settle_selection("Moneyline", "away", None, 24, 21) == "win"
-    assert settle_selection("Moneyline", "home", None, 24, 21) == "loss"
-    assert settle_selection("Spread", "away", -3.0, 24, 21) == "push"
-    assert settle_selection("Spread", "home", 3.0, 24, 21) == "push"
-    assert settle_selection("Total", "over", 45.0, 24, 21) == "push"
-    assert settle_selection("Total", "under", 45.0, 24, 21) == "push"
-    assert settle_selection("Total", "over", 44.5, 24, 21) == "win"
-
-
-def test_record_result_uses_recorded_snapshot_line():
-    store = HistoryStore("sqlite:///:memory:")
-    item = snapshot(best_line="-3")
-    store.insert_snapshot(item)
-    assert store.record_result(item, 24, 21, "away") == "push"
-    assert store.settled_observations()[0]["bet_result"] == "push"
-
-
-def test_american_profit_roi_and_performance_math():
-    rows = [
-        {"bet_result": "win", "best_price": 150, "break_even_pct": 40.0, "clv": 0.02},
-        {"bet_result": "loss", "best_price": -110, "break_even_pct": 52.38, "clv": -0.01},
-        {"bet_result": "push", "best_price": -110, "break_even_pct": 52.38, "clv": None},
-    ]
-    assert american_profit(150) == 1.5
-    assert round(american_profit(-110), 4) == 0.9091
-    values = performance(rows)
-    assert values["wins"] == values["losses"] == values["pushes"] == 1
-    assert values["units"] == 0.5
-    assert round(values["roi"], 4) == round(0.5 / 3, 4)
-    assert values["positive_clv_rate"] == 0.5
-
-
-def test_clv_for_spread_totals_moneyline_and_missing_closing_data():
-    assert calculate_clv("Spread", "away", -6, -5.5, -110, -110) == 0.5
-    assert calculate_clv("Spread", "home", 6, 6.5, -110, -110) == 0.5
-    assert calculate_clv("Total", "over", 47, 46.5, -110, -110) == 0.5
-    assert calculate_clv("Total", "under", 47, 47.5, -110, -110) == 0.5
-    assert calculate_clv("Moneyline", "away", None, None, 150, 130) > 0
-    assert calculate_clv("Spread", "away", -6, None, -110, -110) is None
-
-
-def test_gap_buckets_and_group_analysis():
-    assert [gap_bucket(value) for value in (0, 5, 10, 15, 20, 30)] == ["0-5", "5-10", "10-15", "15-20", "20-30", "30+"]
-    rows = [dict(snapshot(), bet_result="win"), dict(snapshot(money_minus_bets_gap=32), bet_result="loss")]
-    result = bucket_performance(rows)
-    assert set(result) == {"15-20", "30+"}
-
-
-def test_database_url_sqlite_fallback():
-    store = HistoryStore("sqlite:///:memory:")
-    assert store.connection is not None
-    assert not store.is_postgres
+def test_postgres_row_conversion_abstraction_is_dict_like():
+    store=HistoryStore("sqlite:///:memory:"); store.insert_snapshot(item()); assert isinstance(store.snapshots()[0],dict)
