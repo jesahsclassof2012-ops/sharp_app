@@ -55,6 +55,8 @@ def team_code_from_text(value: str) -> Optional[str]:
     match = re.match(r"\s*([A-Za-z]{2,4}|[A-Za-z]-[A-Za-z]{2})\b", value or "")
     if not match:
         return None
+    if match.group(1).upper() in {"OVER", "UNDER"}:
+        return None
     code, flags = parse_team_code(match.group(1))
     return None if flags.malformed_team_code else code
 
