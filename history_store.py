@@ -119,6 +119,7 @@ class HistoryStore:
         self.database_url = database_url or os.getenv("DATABASE_URL")
         self.is_postgres = bool(self.database_url and self.database_url.startswith(("postgres://", "postgresql://")))
         if production and not self.database_url: raise RuntimeError("DATABASE_URL is required for production history")
+        if production and not self.is_postgres: raise RuntimeError("Production history requires a PostgreSQL DATABASE_URL")
         if self.is_postgres:
             try:
                 import psycopg
@@ -183,5 +184,13 @@ def performance(rows: Iterable[dict[str,Any]]) -> dict[str,Any]:
 def bucket_performance(rows: Iterable[dict[str,Any]], field:str="money_minus_bets_gap") -> dict[str,dict[str,Any]]:
     groups={}
     for row in rows:
-        key=gap_bucket(row.get(field)) if field=="money_minus_bets_gap" else ticket_bucket(row.get(field)) if field=="bets_pct" else price_bucket(row.get(field)) if field=="best_price" else "bettor-favorable" if field=="line_vs_split" and str(row.get(field)).startswith("Better") else "not-bettor-favorable" if field=="line_vs_split" else str(row.get(field,"missing")); groups.setdefault(key,[]).append(row)
+        key=gap_bucket(row.get(field)) if field=="money_minus_bets_gap" else ticket_bucket(row.get(field)) if field=="bets_pct" else price_bucket(row.get(field)) if field=="best_price" else line_vs_split_bucket(row.get(field)) if field=="line_vs_split" else str(row.get(field,"missing")); groups.setdefault(key,[]).append(row)
     return {key:performance(value) for key,value in groups.items()}
+
+
+def line_vs_split_bucket(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text.startswith("better"): return "bettor-favorable"
+    if text.startswith("worse"): return "bettor-unfavorable"
+    if text.startswith("same") or text.startswith("no material movement"): return "same"
+    return "not-applicable"

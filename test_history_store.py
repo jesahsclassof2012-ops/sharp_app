@@ -1,4 +1,5 @@
-from history_store import HistoryStore, calculate_clv, event_key, game_key, signal_key, performance
+import pytest
+from history_store import HistoryStore, bucket_performance, calculate_clv, event_key, game_key, line_vs_split_bucket, signal_key, performance
 
 def item(**changes):
     data={"observed_at_utc":"2026-09-13T00:00:00Z","sport":"NFL","matchup":"DEN vs KC","event_start_utc":"2026-09-14T20:00:00Z","market":"Spread","selection":"DEN","selection_side":"away","split_line":"+3 / -3","bets_pct":40,"money_pct":55,"money_minus_bets_gap":15,"best_line":"+3","best_price":-110,"break_even_pct":52.38,"data_quality":"OK","line_vs_split":"Better (+0.5)"}; data.update(changes); return data
@@ -67,3 +68,18 @@ def test_invalid_later_quote_does_not_become_closing_line():
 def test_opposite_side_negative_gap_is_not_a_second_baseline_wager():
     store=HistoryStore("sqlite:///:memory:"); positive=item(selection="DEN",money_minus_bets_gap=20); negative=item(selection="KC",selection_side="home",money_minus_bets_gap=-20)
     store.insert_snapshots([positive,negative]); assert len(store.baseline_entries())==1
+
+def test_line_vs_split_grouping_is_transparent():
+    assert line_vs_split_bucket("Better (+0.5)")=="bettor-favorable"
+    assert line_vs_split_bucket("Worse (-0.5)")=="bettor-unfavorable"
+    assert line_vs_split_bucket("Same (+0)")=="same"
+    assert line_vs_split_bucket("No Material Movement")=="same"
+    assert line_vs_split_bucket("N/A")=="not-applicable"
+    assert set(bucket_performance([dict(item(),line_vs_split="N/A",bet_result="win")],"line_vs_split"))=={"not-applicable"}
+
+@pytest.mark.parametrize("url",[None,"bogus://database","sqlite:///history.db"])
+def test_production_requires_postgresql(url):
+    with pytest.raises(RuntimeError): HistoryStore(url,production=True)
+
+def test_explicit_sqlite_is_local_only():
+    assert not HistoryStore("sqlite:///:memory:",production=False).is_postgres
