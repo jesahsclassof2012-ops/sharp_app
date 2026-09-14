@@ -136,3 +136,14 @@ def test_fetch_data_cache_keeps_actual_fetch_timestamp(monkeypatch):
     streamlit_app.fetch_data("CACHE-TEST")
     assert len(calls) == 2
     streamlit_app.fetch_data.clear()
+
+
+def test_history_ui_without_database_url_warns_without_sqlite(monkeypatch):
+    messages = []
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(streamlit_app.st, "divider", lambda: None)
+    monkeypatch.setattr(streamlit_app.st, "header", lambda *args, **kwargs: None)
+    monkeypatch.setattr(streamlit_app.st, "warning", messages.append)
+    monkeypatch.setattr(streamlit_app, "HistoryStore", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not open SQLite")))
+    streamlit_app.render_history()
+    assert messages == ["History unavailable: configure DATABASE_URL."]
