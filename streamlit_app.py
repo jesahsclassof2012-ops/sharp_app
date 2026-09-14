@@ -1,753 +1,304 @@
-import streamlit as st
-import requests
-from bs4 import BeautifulSoup
-import re
-from collections import defaultdict
-import pandas as pd
-from datetime import datetime, timezone, timedelta
-import pytz
+"""Sharp Signal V2 Streamlit application.
 
-# Set page config
-st.set_page_config(
-    page_title="Sports Betting Consensus Picks",
-    layout="wide",
-    menu_items={
-        'Get Help': 'https://www.scoresandodds.com/contact',
-        'Report a bug': "https://github.com/streamlit/streamlit/issues",
-        'About': "# This is a header. This is an *extremely* cool app!"
-    },
-    initial_sidebar_state="expanded"
+The page deliberately reports observed splits and executable prices; it does not
+turn them into a prediction, confidence score, or betting recommendation.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
+
+import pandas as pd
+import pytz
+import requests
+import streamlit as st
+from bs4 import BeautifulSoup, Tag
+
+from sharp_core import (
+    DataQualityFlags,
+    american_odds_to_break_even_probability,
+    calculate_money_minus_bets_screen,
+    compare_lines,
+    compare_total_lines,
+    impute_missing_percentage,
+    parse_american_odds,
+    parse_spread,
+    parse_team_code,
+    parse_total,
+    validate_percentages,
 )
 
 
-# Define the dynamic threshold function
-def get_dynamic_threshold(bets_percentage):
-    """
-    Calculates the required difference between Money % and Bets %
-    based on a tiered dynamic threshold logic.
-    """
-    if pd.isna(bets_percentage):
-        return 0 # Or some other appropriate default/indicator
-    if bets_percentage <= 25:
-        return 15
-    elif bets_percentage <= 50:
-        return 8
-    elif bets_percentage <= 75:
-        return 5
-    else: # bets_percentage > 75
-        return 3
+SPORTS = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
+PACIFIC = pytz.timezone("America/Los_Angeles")
+DISPLAY_COLUMNS = [
+    "Matchup", "Start time", "Market", "Selection", "Bets %", "Money %",
+    "Money minus Bets gap", "Signal", "Split line", "Best line", "Best price",
+    "Break-even %", "Line vs split", "Data quality", "Last refresh time",
+]
 
 
-# Function to extract percentage from text or style attribute
-def extract_percentage(percentage_element):
-    if percentage_element:
-        text_percentage = percentage_element.get_text(strip=True).replace('%', '')
-        if text_percentage and text_percentage != '&nbsp;':
-            try:
-                return float(text_percentage)
-            except ValueError:
-                pass  # Fallback to style if text is not a valid number
+def extract_percentage(element: Optional[Tag]) -> Optional[float]:
+    """Read a displayed percentage, falling back to the chart-bar width."""
+    if not element:
+        return None
+    text = element.get_text(" ", strip=True).replace("%", "")
+    match = re.search(r"\b(\d{1,3}(?:\.\d+)?)\b", text)
+    if match:
+        return float(match.group(1))
+    style = element.get("style", "")
+    match = re.search(r"width:\s*(\d+(?:\.\d+)?)%", style, re.I)
+    return float(match.group(1)) if match else None
 
-        # If text is not available or not a valid number, try to get from style attribute
-        style = percentage_element.get('style')
-        if style:
-            width_match = re.search(r'width:\s*([\d+\.]+)\%', style)
-            if width_match:
-                try:
-                    return float(width_match.group(1))
-                except ValueError:
-                    pass
 
+def team_code_from_text(value: str) -> Optional[str]:
+    """Find an S&O team code without limiting it to the old 2/3-char format."""
+    match = re.match(r"\s*([A-Za-z]{2,4}|[A-Za-z]-[A-Za-z]{2})\b", value or "")
+    if not match:
+        return None
+    if match.group(1).upper() in {"OVER", "UNDER"}:
+        return None
+    code, flags = parse_team_code(match.group(1))
+    return None if flags.malformed_team_code else code
+
+
+def label_market(label: str, teams: list[str], card_classes: list[str] | None = None) -> str:
+    """Classify a trend card, preferring ScoresAndOdds' market-class metadata."""
+    class_text = " ".join(card_classes or ()).lower()
+    if "consensus-table-spread" in class_text:
+        return "Spread"
+    if "consensus-table-moneyline" in class_text:
+        return "Moneyline"
+    if "consensus-table-total" in class_text:
+        return "Total"
+    text = f"{label} {' '.join(teams)}".lower()
+    if "total" in text or re.search(r"\b[ou]\d+(?:\.\d+)?", text):
+        return "Total"
+    if "spread" in text or re.search(r"\b(?:pk|pick|pick'em)\b", text) or any(re.search(r"[+-]\d", team) for team in teams):
+        return "Spread"
+    return "Moneyline"
+
+
+def quote_from_container(container: Tag) -> tuple[Optional[str], Optional[int]]:
+    """Return separate executable line and American price from an S&O quote."""
+    # In the live page, line and price are distinct siblings: data-moneyline is
+    # the executable line and data-odds is the price.  Never infer one from the
+    # other just because both contain signed numbers.
+    line_node = container.select_one("span.data-moneyline")
+    price_node = container.select_one("small.data-odds.best, small.data-odds")
+    line = line_node.get_text(" ", strip=True).replace(" ", "") if line_node else None
+    price_text = price_node.get_text(" ", strip=True) if price_node else None
+    # Moneyline cards have no point/total line.  Their data-moneyline value is
+    # itself the executable American price, unlike spread and total cards.
+    if price_text is None:
+        price, _ = parse_american_odds(line or "N/A")
+        return None, price
+    price, _ = parse_american_odds(price_text or "N/A")
+    return line, price
+
+
+def best_quotes(card: Tag) -> dict[str, tuple[Optional[str], Optional[int]]]:
+    """Read executable quotes by explicit label; totals never borrow away/home odds."""
+    quotes: dict[str, tuple[Optional[str], Optional[int]]] = {}
+    for container in card.select(".best-odds-container"):
+        label = container.get_text(" ", strip=True).lower()
+        for key in ("away", "home", "over", "under"):
+            if f"best {key}" in label:
+                quotes[key] = quote_from_container(container)
+    return quotes
+
+
+def split_line(market: str, team_texts: list[str], label: str) -> Optional[str]:
+    """Extract a consensus/split line only from the current market card."""
+    if market == "Spread":
+        parsed, _ = parse_spread(" / ".join(team_texts))
+        return f"{parsed[0]:g} / {parsed[1]:g}" if parsed else None
+    if market == "Total":
+        total, _ = parse_total(f"{label} {' '.join(team_texts)}")
+        return f"{total:g}" if total is not None else None
     return None
 
-# Function to extract and format betting lines from the best odds string
-def extract_betting_lines(best_odds_string):
-    if not best_odds_string or best_odds_string == 'N/A':
-        return 'N/A'
-    # Extract numbers with potential + or - signs
-    lines = re.findall(r'[\+\-]?\d+', best_odds_string)
-    if len(lines) >= 2:
-        return f"{lines[0]} / {lines[1]}"
-    elif len(lines) == 1:
-        return lines[0]
-    return 'N/A'
 
-# Define baseline handle values
-baseline_handles = {
-    "NFL": 12_000_000,
-    "NCAAF": 4_000_000,
-    "NBA": 2_000_000,
-    "MLB": 1_000_000,
-    "NHL": 800_000,
-    "Others": 500_000
-}
+def format_start(card: Tag) -> Optional[datetime]:
+    node = card.select_one('[data-role="localtime"]')
+    raw = node.get("data-value") if node else None
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(PACIFIC)
+    except ValueError:
+        return None
 
-# Define scaling factor
-scaling_factor = 0.000001
 
-# Function to determine decision logic label based on Actual Diff %
-def get_decision_label(relative_differential):
-    if pd.isna(relative_differential):
+def quality_text(*flags: Any) -> str:
+    issues = []
+    for flag_set in flags:
+        for name, enabled in vars(flag_set).items():
+            if enabled:
+                issues.append(name.replace("_", " "))
+    return "; ".join(sorted(set(issues))) or "OK"
+
+
+def line_number(value: Optional[str]) -> Optional[float]:
+    """Extract the numeric portion of one spread or total line."""
+    if (value or "").strip().upper() in {"PK", "PICK", "PICK'EM"}:
+        return 0.0
+    match = re.search(r"(?:[ou]\s*)?([+-]?\d+(?:\.\d+)?)", value or "", re.I)
+    return float(match.group(1)) if match else None
+
+
+def line_vs_split_label(market: str, best_line: Optional[str], split: Optional[str], side: str) -> str:
+    """Describe the executable line from the selected bettor's perspective."""
+    if not best_line or not split or split == "N/A":
         return "N/A"
-    elif relative_differential > 20:
-        return "🔥🔥 Extreme Sharp Play"
-    elif relative_differential >= 15:
-        return "🔒 Verified Sharp Play"
-    elif relative_differential >= 10:
-        return "💎 Strong Sharp"
-    elif relative_differential >= 5:
-        return "📈 Medium Sharp"
-    elif relative_differential > 0:
-        return "📊 Slight Sharp"
-    elif relative_differential == 0:
-        return "⚖️ Neutral"
-    elif relative_differential >= -5:
-        return "⬇️ Slight Public"
-    elif relative_differential >= -10:
-        return "⚠️ Public-lean bias"
-    elif relative_differential < -10:
-        return "🚨 Strong Public"
-    else:
-        return "Other (Unhandled Score)"
-
-
-def get_confidence_score_label(confidence_score):
-    if pd.isna(confidence_score):
+    if market == "Spread":
+        consensus, _ = parse_spread(split)
+        best_value = line_number(best_line)
+        if not consensus or best_value is None:
             return "N/A"
-    elif confidence_score > 20:
-        return "🔥🔥 Extreme Sharp Play"
-    elif confidence_score >= 15:
-        return "🔒 Verified Sharp Play"
-    elif confidence_score >= 10:
-        return "💎 Strong Sharp"
-    elif confidence_score >= 5:
-        return "📈 Medium Sharp"
-    elif confidence_score > 0: # and confidence_score < 5:
-        return "📊 Slight Sharp"
-    elif confidence_score == 0:
-        return "⚖️ Neutral"
-    elif confidence_score >= -5: # and confidence_score < 0:
-        return "⬇️ Slight Public"
-    elif confidence_score >= -10: # and confidence_score < -5:
-        return "⚠️ Public-lean bias"
-    elif confidence_score < -10:
-        return "🚨 Strong Public"
+        index = 0 if side == "away" else 1
+        current = (best_value, 0.0) if index == 0 else (0.0, best_value)
+        label, movement = compare_lines(current, consensus, side)
+    elif market == "Total":
+        best_value, _ = parse_total(best_line)
+        split_value, _ = parse_total("o" + split)
+        label, movement = compare_total_lines(best_value, split_value, side)
     else:
-        return "Other (Unhandled Score)"
+        return "N/A"
+    if label == "N/A":
+        return label
+    direction = "Better" if label.startswith("Better") else "Worse" if label.startswith("Worse") else "Same"
+    return f"{direction} ({movement:+g})"
 
-def fetch_and_process_data(sport):
-    """Fetches and processes consensus pick data for a given sport."""
-    st.write(f"Fetching data for {sport}...")
-    url = f"https://www.scoresandodds.com/{sport.lower()}/consensus-picks"
-    st.write(f"Fetching URL: {url}")
 
+def parse_scoresandodds_html(html: str, refreshed_at: datetime) -> pd.DataFrame:
+    """Convert S&O trend cards to one transparent row per selectable side.
+
+    Each card supplies its own teams and matchup identity.  In particular, a
+    total card is never attached to whichever prior moneyline/spread card was
+    encountered by the scraper.
+    """
+    rows: list[dict[str, Any]] = []
+    soup = BeautifulSoup(html, "html.parser")
+    for card in soup.select("div.trend-card"):
+        chart = card.select_one(".trend-graph-chart")
+        if not chart:
+            continue
+        sides = chart.select_one(".trend-graph-sides")
+        team_texts = [item.get_text(" ", strip=True) for item in sides.select("strong")] if sides else []
+        label_node = sides.select_one("span") if sides else None
+        label = label_node.get_text(" ", strip=True) if label_node else ""
+        market = label_market(label, team_texts, card.get("class", []))
+        codes = [team_code_from_text(team) for team in team_texts]
+        card_flags = [parse_team_code(code)[1] for code in codes if code]
+        event_teams = [node.get_text(" ", strip=True) for node in card.select(".event-header .team-name")]
+        matchup_node = card.select_one(".event-matchup, .trend-card-title, [data-role='matchup']")
+        matchup = matchup_node.get_text(" ", strip=True) if matchup_node else " vs ".join(event_teams or [c for c in codes if c])
+        if not matchup:
+            matchup = "Unidentified matchup"
+            card_flags.append(DataQualityFlags(missing_matchup=True))
+
+        percentage_groups = chart.select(".trend-graph-percentage")
+        def pair(index: int) -> tuple[Optional[float], Optional[float]]:
+            if len(percentage_groups) <= index:
+                return None, None
+            values = percentage_groups[index].select("span")
+            return (extract_percentage(values[0]) if len(values) > 0 else None,
+                    extract_percentage(values[1]) if len(values) > 1 else None)
+        bet_one, bet_two = impute_missing_percentage(*pair(0))
+        money_one, money_two = impute_missing_percentage(*pair(1))
+        percentage_flags = validate_percentages(bet_one, bet_two)
+        money_flags = validate_percentages(money_one, money_two)
+        quotes = best_quotes(card)
+        current_split = split_line(market, team_texts, label)
+        selections = [("Over", bet_one, money_one, "over"), ("Under", bet_two, money_two, "under")] if market == "Total" else [
+            (codes[0] or team_texts[0] if team_texts else "Away", bet_one, money_one, "away"),
+            (codes[1] or team_texts[1] if len(team_texts) > 1 else "Home", bet_two, money_two, "home"),
+        ]
+        for selection, bets, money, quote_key in selections:
+            best_line, best_price = quotes.get(quote_key, (None, None))
+            odds_flags = parse_american_odds(str(best_price) if best_price is not None else "N/A")[1]
+            gap, _ = calculate_money_minus_bets_screen(money, bets)
+            # A readable observation, not an inferred probability or rating.
+            signal = "Money exceeds bets" if gap is not None and gap > 0 else "Bets exceed money" if gap is not None and gap < 0 else "Unavailable"
+            break_even = american_odds_to_break_even_probability(best_price)
+            line_vs_split = line_vs_split_label(market, best_line, current_split, quote_key)
+            rows.append({
+                "Matchup": matchup, "Start time": format_start(card), "Market": market,
+                "Selection": selection, "Bets %": bets, "Money %": money,
+                "Money minus Bets gap": gap, "Signal": signal, "Split line": current_split or "N/A",
+                "Best line": best_line or "N/A", "Best price": best_price,
+                "Break-even %": round(break_even * 100, 2) if break_even is not None else None,
+                "Line vs split": line_vs_split,
+                "Data quality": quality_text(*card_flags, percentage_flags, money_flags, odds_flags),
+                "Last refresh time": refreshed_at.astimezone(PACIFIC),
+            })
+    return pd.DataFrame(rows, columns=DISPLAY_COLUMNS)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_data(sport: str) -> pd.DataFrame:
+    """Fetch source data once per sport/TTL; filters must not bust this cache."""
+    response = requests.get(
+        f"https://www.scoresandodds.com/{sport.lower()}/consensus-picks",
+        headers={"User-Agent": "Mozilla/5.0"}, timeout=20,
+    )
+    response.raise_for_status()
+    return parse_scoresandodds_html(response.text, datetime.now(timezone.utc))
+
+
+def add_session_movement(data: pd.DataFrame) -> pd.DataFrame:
+    """Compare only snapshots made in this browser session; no history is stored."""
+    prior = st.session_state.get("sharp_v2_snapshot", {})
+    movement = []
+    for _, row in data.iterrows():
+        key = (row["Matchup"], row["Market"], row["Selection"])
+        old = prior.get(key)
+        movement.append("New this session" if old is None else f"Prior best line: {old}")
+    st.session_state["sharp_v2_snapshot"] = {
+        (row["Matchup"], row["Market"], row["Selection"]): row["Best line"] for _, row in data.iterrows()
+    }
+    data = data.copy()
+    data["Session movement"] = movement
+    return data
+
+
+def main() -> None:
+    st.set_page_config(page_title="Sharp Signal V2", layout="wide", initial_sidebar_state="expanded")
+    st.title("Sharp Signal V2")
+    st.caption("Transparent split screening. Signals are observations, not betting advice.")
+    sport = st.sidebar.selectbox("Sport", SPORTS)
+    min_gap = st.sidebar.slider("Minimum Money minus Bets gap", -50.0, 50.0, 0.0, 0.5)
+    max_tickets = st.sidebar.slider("Maximum ticket share", 0.0, 100.0, 100.0, 1.0)
+    market = st.sidebar.selectbox("Market", ["All", "Moneyline", "Spread", "Total"])
+    hours = st.sidebar.slider("Time window (hours)", 1, 168, 24)
+    require_price = st.sidebar.checkbox("Require current best price", value=True)
+    if st.sidebar.button("Refresh"):
+        fetch_data.clear()
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/555.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/555.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image:*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'en-US,en;q=0.9'
-        }
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        html_content_new = response.text
-        st.write(f"Successfully fetched page content for {sport}.")
-
-        if "There are no games scheduled today." in html_content_new:
-            st.write("There were no games scheduled today.")
-            return pd.DataFrame()
-
-        soup = BeautifulSoup(html_content_new, 'html.parser')
-        matchup_containers = soup.find_all('div', class_='trend-card')
-
-        data_new = []
-
-        for container in matchup_containers:
-            chart = container.find('span', class_='trend-graph-chart')
-            odds_element = container.find('span', class_='best-odds')
-            localtime_element = container.find('span', attrs={"data-role": "localtime"})
-
-            if not chart:
-                continue
-
-            away_odds = None
-            home_odds = None
-            if odds_element:
-                odds_containers_inner = odds_element.find_all('div', class_='best-odds-container')
-                for inner_container in odds_containers_inner:
-                     span_text = inner_container.find('span').get_text(strip=True)
-                     if 'Best away Odds' in span_text:
-                         away_other_odds = inner_container.find('small', class_='data-odds best')
-                         if away_other_odds:
-                             away_odds = away_other_odds.get_text(strip=True)
-                         else: 
-                             away_moneyline_odds = inner_container.find('span', class_='data-moneyline')
-                             if away_moneyline_odds:
-                                 away_odds = away_moneyline_odds.get_text(strip=True)
-
-                     elif 'Best home Odds' in span_text:
-                          home_other_odds = inner_container.find('small', class_='data-odds best')
-                          if home_other_odds:
-                              home_odds = home_other_odds.get_text(strip=True)
-                          else:
-                              home_moneyline_odds = inner_container.find('span', class_='data-moneyline')
-                              if home_moneyline_odds:
-                                  home_odds = home_moneyline_odds.get_text(strip=True)
-            current_odds = {'away_odds': away_odds, 'home_odds': home_odds}
-
-            current_localtime = 'N/A'
-            if localtime_element:
-                localtime_value = localtime_element.get('data-value')
-                if localtime_value:
-                    try:
-                        pst = pytz.timezone('America/Los_Angeles')
-                        utc_time = datetime.fromisoformat(localtime_value.replace('Z', '+00:00'))
-                        pst_time = utc_time.astimezone(pst)
-                        current_localtime = pst_time.strftime('%m/%d %I:%M%p').replace('AM', 'am').replace('PM', 'pm')
-                    except ValueError:
-                        pass
-
-            sides_element_bets = chart.find('span', class_='trend-graph-sides')
-            teams = []
-            betting_label_bets = 'N/A'
-            if sides_element_bets:
-                teams = [team.get_text(strip=True).replace('\n', '') for team in sides_element_bets.find_all('strong')]
-                betting_label_bets = sides_element_bets.find('span').get_text(strip=True) if sides_element_bets.find('span') else 'N/A'
-
-            percentages_bets_element = chart.find_all('span', class_='trend-graph-percentage')
-            bets_percentage_pair = {}
-            if percentages_bets_element:
-                bets_spans = percentages_bets_element[0].find_all('span')
-                if len(bets_spans) >= 2:
-                    bets_percentage_pair = {
-                        'team1_percentage': extract_percentage(bets_spans[0]),
-                        'team2_percentage': extract_percentage(bets_spans[1])
-                    }
-
-            money_percentage_pair = {}
-            if len(percentages_bets_element) > 1:
-                money_spans = percentages_bets_element[1].find_all('span')
-                if len(money_spans) >= 2:
-                    money_percentage_pair = {
-                        'team1_percentage': extract_percentage(money_spans[0]),
-                        'team2_percentage': extract_percentage(money_spans[1])
-                    }
-
-            sides_element_money = chart.find('span', class_='trend-graph-sides center')
-            betting_label_money = 'N/A'
-            if sides_element_money:
-                betting_label_money = sides_element_money.find('span').get_text(strip=True) if sides_element_money.find('span') else 'N/A'
-
-            if teams:
-                entry_data = {
-                    'teams': teams,
-                    'betting_label_bets': betting_label_bets,
-                    'bets_percentages': bets_percentage_pair,
-                    'betting_label_money': betting_label_money,
-                    'money_percentages': money_percentage_pair,
-                    'best_odds': current_odds,
-                    'matchup_time': current_localtime
-                }
-                data_new.append(entry_data)
-
-
-        moneyline_data = {}
-        spread_data = {}
-        total_data = {}
-        current_matchup_teams = (None, None)
-        current_odds = None
-        current_matchup_time = 'N/A'
-
-        for entry in data_new:
-            teams = entry.get('teams', [])
-            betting_label_bets = entry.get('betting_label_bets', 'N/A')
-            bets_percentages = entry.get('bets_percentages', {})
-            betting_label_money = entry.get('betting_label_money', {})
-            money_percentages = entry.get('money_percentages', {})
-            entry_odds = entry.get('best_odds')
-            entry_matchup_time = entry.get('matchup_time', 'N/A')
-
-            betting_category = 'Unknown'
-            total_line = None
-            spread_line = None
-
-            if betting_label_bets == '% of Bets':
-                if len(teams) >= 2:
-                     team1_name_raw = teams[0]
-                     team2_name_raw = teams[1]
-
-                     if re.match(r'^[A-Z]{2,3}$', team1_name_raw) and re.match(r'^[A-Z]{2,3}$', team2_name_raw):
-                         betting_category = 'Moneyline'
-                         current_matchup_teams = (team1_name_raw, team2_name_raw)
-                         current_odds = entry_odds
-                         current_matchup_time = entry_matchup_time
-                     elif re.search(r'[\+\-]', team1_name_raw) or re.search(r'[\+\-]', team2_name_raw):
-                         betting_category = 'Spread'
-                         team1_name = re.findall(r'^[A-Z]{2,3}', team1_name_raw)[0] if re.findall(r'^[A-Z]{2,3}', team1_name_raw) else team1_name_raw
-                         team2_name = re.findall(r'^[A-Z]{2,3}', team2_name_raw)[0] if re.findall(r'^[A-Z]{2,3}', team2_name_raw) else team2_name_raw
-                         current_matchup_teams = (team1_name, team2_name)
-                         current_odds = entry_odds
-                         current_matchup_time = entry_matchup_time
-
-                         # Updated regex to capture both decimal and integer spread values
-                         spread_line_match1 = re.search(r'([\+\-]?\d+(\.\d+)?)', team1_name_raw)
-                         spread_line_match2 = re.search(r'([\+\-]?\d+(\.\d+)?)', team2_name_raw)
-                         if spread_line_match1 and spread_line_match2:
-                             spread_line = f"{spread_line_match1.group(1)} / {spread_line_match2.group(1)}"
-
-            elif '(' in betting_label_bets and ')' in betting_label_bets and ('o' in betting_label_bets or 'u' in betting_label_bets):
-                betting_category = 'Total'
-                if len(teams) >= 2:
-                    line_match = re.search(r'\(?[ou]([\d+\.]+)\)?', teams[0])
-                    if line_match:
-                        total_line = line_match.group(1)
-                current_odds = entry_odds
-                current_matchup_time = entry_matchup_time
-
-
-            if current_matchup_teams[0] and current_matchup_teams[1]:
-                matchup_key = f"{current_matchup_teams[0]} vs {current_matchup_teams[1]}"
-
-                team1_bets_percentage = bets_percentages.get('team1_percentage', 'N/A')
-                team2_bets_percentage = bets_percentages.get('team2_percentage', 'N/A')
-                team1_money_percentage = money_percentages.get('team1_percentage', 'N/A')
-                team2_money_percentage = money_percentages.get('team2_percentage', 'N/A')
-
-                if betting_category == 'Moneyline':
-                    if matchup_key not in moneyline_data:
-                        moneyline_data[matchup_key] = {'Matchup Teams': matchup_key, 'Away Odds': entry_odds['away_odds'], 'Home Odds': entry_odds['home_odds'], 'Matchup Time': current_matchup_time}
-                    moneyline_data[matchup_key]['Team 1 Bets %'] = team1_bets_percentage
-                    moneyline_data[matchup_key]['Team 2 Bets %'] = team2_bets_percentage
-                    moneyline_data[matchup_key]['Team 1 Money %'] = team1_money_percentage
-                    moneyline_data[matchup_key]['Team 2 Money %'] = team2_money_percentage
-                elif betting_category == 'Spread':
-                    if matchup_key not in spread_data:
-                        spread_data[matchup_key] = {'Matchup Teams': matchup_key, 'Spread Line': 'N/A', 'Away Odds': entry_odds['away_odds'], 'Home Odds': entry_odds['home_odds'], 'Matchup Time': current_matchup_time}
-                    spread_data[matchup_key]['Team 1 Bets %'] = team1_bets_percentage
-                    spread_data[matchup_key]['Team 2 Bets %'] = team2_bets_percentage
-                    spread_data[matchup_key]['Team 1 Money %'] = team1_money_percentage
-                    spread_data[matchup_key]['Team 2 Money %'] = team2_money_percentage
-                    spread_data[matchup_key]['Spread Line'] = spread_line
-                elif betting_category == 'Total':
-                     if matchup_key not in total_data:
-                         total_data[matchup_key] = {'Matchup Teams': matchup_key, 'Total Line': 'N/A', 'Away Odds': entry_odds['away_odds'], 'Home Odds': entry_odds['home_odds'], 'Matchup Time': current_matchup_time}
-                     total_data[matchup_key]['Over Bets %'] = team1_bets_percentage
-                     total_data[matchup_key]['Under Bets %'] = team2_bets_percentage
-                     total_data[matchup_key]['Over Money %'] = team1_money_percentage
-                     total_data[matchup_key]['Under Money %'] = team2_money_percentage
-                     total_data[matchup_key]['Total Line'] = total_line
-
-
-        moneyline_list = list(moneyline_data.values())
-        spread_list = list(spread_data.values())
-        total_list = list(total_data.values())
-
-        df_moneyline = pd.DataFrame(moneyline_list)
-        df_spread = pd.DataFrame(spread_list)
-        df_total = pd.DataFrame(total_list)
-
-
-        def impute_percentage(df, col1, col2):
-            for index, row in df.iterrows():
-                p1 = row[col1]
-                p2 = row[col2]
-                if p1 is not None and p2 is None:
-                     df.at[index, col2] = 100.0 - p1
-                elif p2 is not None and p1 is None:
-                     df.at[index, col1] = 100.0 - p2
-
-        impute_percentage(df_moneyline, 'Team 1 Bets %', 'Team 2 Bets %')
-        impute_percentage(df_moneyline, 'Team 1 Money %', 'Team 2 Money %')
-        impute_percentage(df_spread, 'Team 1 Bets %', 'Team 2 Bets %')
-        impute_percentage(df_spread, 'Team 1 Money %', 'Team 2 Money %')
-        impute_percentage(df_total, 'Over Bets %', 'Under Bets %')
-        impute_percentage(df_total, 'Over Money %', 'Under Money %')
-
-        for df in [df_moneyline, df_spread, df_total]:
-            for col in df.columns:
-                if '%' in col:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        qualified_picks = []
-        required_diff = 0
-
-
-        if not df_moneyline.empty:
-            for index, row in df_moneyline.iterrows():
-                matchup = row['Matchup Teams']
-                team1_name, team2_name = matchup.split(" vs ")
-                away_odds = row.get('Away Odds', 'N/A')
-                home_odds = row.get('Home Odds', 'N/A')
-                matchup_time = row.get('Matchup Time', 'N/A')
-
-                team1_bets = row.get('Team 1 Bets %')
-                team1_money = row.get('Team 1 Money %')
-                if team1_bets is not None and team1_money is not None:
-                    qualified_picks.append({
-                        'Matchup': matchup,
-                        'Team': team1_name,
-                        'Matchup Time': matchup_time,
-                        'Betting Category': 'Moneyline',
-                        'Bets %': team1_bets,
-                        'Money %': team1_money,
-                        'Required Diff %': required_diff,
-                        'Actual Diff %': round(team1_money - team1_bets, 2),
-                        'Away Odds': away_odds,
-                        'Home Odds': home_odds
-                    })
-
-                team2_bets = row.get('Team 2 Bets %')
-                team2_money = row.get('Team 2 Money %')
-                if team2_bets is not None and team2_money is not None:
-                     qualified_picks.append({
-                        'Matchup': matchup,
-                        'Team': team2_name,
-                        'Matchup Time': matchup_time,
-                        'Betting Category': 'Moneyline',
-                        'Bets %': team2_bets,
-                        'Money %': team2_money,
-                        'Required Diff %': required_diff,
-                        'Actual Diff %': round(team2_money - team2_bets, 2),
-                        'Away Odds': away_odds,
-                        'Home Odds': home_odds
-                    })
-
-        if not df_spread.empty:
-            for index, row in df_spread.iterrows():
-                matchup = row['Matchup Teams']
-                team1_name, team2_name = matchup.split(" vs ")
-                away_odds = row.get('Away Odds', 'N/A')
-                home_odds = row.get('Home Odds', 'N/A')
-                matchup_time = row.get('Matchup Time', 'N/A')
-
-                team1_bets = row.get('Team 1 Bets %')
-                team1_money = row.get('Team 1 Money %')
-                if team1_bets is not None and team1_money is not None:
-                    qualified_picks.append({
-                        'Matchup': matchup,
-                        'Team': team1_name,
-                        'Matchup Time': matchup_time,
-                        'Betting Category': 'Spread',
-                        'Bets %': team1_bets,
-                        'Money %': team1_money,
-                        'Spread Line': row.get('Spread Line', 'N/A'),
-                        'Required Diff %': required_diff,
-                        'Actual Diff %': round(team1_money - team1_bets, 2),
-                        'Away Odds': away_odds,
-                        'Home Odds': home_odds
-                    })
-
-                team2_bets = row.get('Team 2 Bets %')
-                team2_money = row.get('Team 2 Money %')
-                if team2_bets is not None and team2_money is not None:
-                     qualified_picks.append({
-                        'Matchup': matchup,
-                        'Team': team2_name,
-                        'Matchup Time': matchup_time,
-                        'Betting Category': 'Spread',
-                        'Bets %': team2_bets,
-                        'Money %': team2_money,
-                        'Spread Line': row.get('Spread Line', 'N/A'),
-                        'Required Diff %': required_diff,
-                        'Actual Diff %': round(team2_money - team2_bets, 2),
-                        'Away Odds': away_odds,
-                        'Home Odds': home_odds
-                    })
-
-        if not df_total.empty:
-            for index, row in df_total.iterrows():
-                matchup = row['Matchup Teams']
-                team1_name, team2_name = matchup.split(" vs ")
-                away_odds = row.get('Away Odds', 'N/A')
-                home_odds = row.get('Home Odds', 'N/A')
-                matchup_time = row.get('Matchup Time', 'N/A')
-
-                over_bets = row.get('Over Bets %')
-                over_money = row.get('Over Money %')
-                if over_bets is not None and over_money is not None:
-                    qualified_picks.append({
-                        'Matchup': matchup,
-                        'Team': f"Over {row.get('Total Line', 'N/A')}",
-                        'Matchup Time': matchup_time,
-                        'Betting Category': 'Total',
-                        'Bets %': over_bets,
-                        'Money %': over_money,
-                        'Required Diff %': required_diff,
-                        'Actual Diff %': round(over_money - over_bets, 2),
-                        'Away Odds': away_odds,
-                        'Home Odds': home_odds
-                    })
-
-                under_bets = row.get('Under Bets %')
-                under_money = row.get('Under Money %')
-                if under_bets is not None and under_money is not None:
-                    qualified_picks.append({
-                        'Matchup': matchup,
-                        'Team': f"Under {row.get('Total Line', 'N/A')}",
-                        'Matchup Time': matchup_time,
-                        'Betting Category': 'Total',
-                        'Bets %': under_bets,
-                        'Money %': under_money,
-                        'Required Diff %': required_diff,
-                        'Actual Diff %': round(under_money - under_bets, 2),
-                        'Away Odds': away_odds,
-                        'Home Odds': home_odds
-                    })
-
-
-        df_picks_meeting_thresholds = pd.DataFrame(qualified_picks)
-
-        if 'Required Diff %' in df_picks_meeting_thresholds.columns:
-            df_picks_meeting_thresholds = df_picks_meeting_thresholds.drop(columns=['Required Diff %'])
-
-        df_picks_meeting_thresholds['Sport'] = sport
-        df_picks_meeting_thresholds['est_handle'] = df_picks_meeting_thresholds['Sport'].apply(lambda s: baseline_handles.get(s, 0) * scaling_factor)
-
-        df_picks_meeting_thresholds['Divergence'] = abs(df_picks_meeting_thresholds['Bets %'] - df_picks_meeting_thresholds['Money %'])
-        df_picks_meeting_thresholds['Disagreement Index'] = df_picks_meeting_thresholds[['Bets %', 'Money %']].min(axis=1)
-        df_picks_meeting_thresholds['Consensus Strength'] = df_picks_meeting_thresholds[['Bets %', 'Money %']].max(axis=1)
-        df_picks_meeting_thresholds['Weighted Signal'] = df_picks_meeting_thresholds['est_handle'] * df_picks_meeting_thresholds['Disagreement Index'] * df_picks_meeting_thresholds['Consensus Strength'] / 1_000_000
-
-        # Calculate Relative Differential BEFORE Decision Logic
-        df_picks_meeting_thresholds['Relative Differential'] = df_picks_meeting_thresholds.apply(
-            lambda row: row['Actual Diff %'] * row['Bets %'] / 100 if row['Bets %'] is not None else None,
-            axis=1
-        )
-        df_picks_meeting_thresholds['Decision Logic'] = df_picks_meeting_thresholds['Relative Differential'].apply(get_decision_label)
-
-        df_picks_meeting_thresholds['Confidence Score'] = (0.45 * df_picks_meeting_thresholds['Relative Differential']) + \
-                                                          (0.35 * df_picks_meeting_thresholds['Actual Diff %']) + \
-                                                          (0.15 * df_picks_meeting_thresholds['Weighted Signal'] * 100) - \
-                                                          (0.05 * df_picks_meeting_thresholds['Disagreement Index'])
-        df_picks_meeting_thresholds['Confidence Score Label'] = df_picks_meeting_thresholds['Confidence Score'].apply(get_confidence_score_label)
-
-        # Convert 'Matchup Time' to datetime objects with error handling and correct year
-        df_picks_meeting_thresholds['Matchup Time'] = df_picks_meeting_thresholds['Matchup Time'].astype(str)
-        # Get the current year to use for parsing
-        current_year = datetime.now().year
-        df_picks_meeting_thresholds['Matchup Time'] = df_picks_meeting_thresholds['Matchup Time'].apply(
-            lambda x: datetime.strptime(f"{current_year}/{x}", '%Y/%m/%d %I:%M%p') if x != 'N/A' else None
-        )
-
-        # Check for any NaT values after conversion
-        if df_picks_meeting_thresholds['Matchup Time'].isnull().any():
-            st.warning("Some matchup times could not be parsed and may be excluded from time-based filtering.")
-
-        # Localize the datetime objects to PST before comparison.
-        pst = pytz.timezone('America/Los_Angeles')
-        df_picks_meeting_thresholds['Matchup Time'] = df_picks_meeting_thresholds['Matchup Time'].apply(lambda x: pst.localize(x) if pd.notnull(x) else None)
-
-
-        df_picks_meeting_thresholds = df_picks_meeting_thresholds.sort_values(by=['Matchup Time', 'Relative Differential'], ascending=[True, False])
-
-        desired_column_order = ['Matchup', 'Team', 'Matchup Time', 'Betting Category', 'Decision Logic', 'Confidence Score Label', 'Relative Differential', 'Bets %', 'Money %', 'Actual Diff %', 'Away Odds', 'Home Odds', 'Spread Line', 'Sport']
-        df_picks_meeting_thresholds = df_picks_meeting_thresholds.reindex(columns=desired_column_order)
-
-        return df_picks_meeting_thresholds
-
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching the page: {e}")
-        return pd.DataFrame()
-
-st.title("Sports Betting Consensus Picks")
-
-st.markdown("Look for the `>>` or `>` arrow on the left side of the screen (especially on mobile) to open the sidebar and access filters and data refresh options.")
-
-sports = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
-selected_sport = st.sidebar.selectbox("Select a Sport", sports)
-
-# Define default values for filters
-default_time_window = 1
-decision_logic_options = ['All Picks', 'High Confidence']
-# Update default_decision_logic_index to point to 'High Confidence' in the new list
-default_decision_logic_index = decision_logic_options.index('High Confidence')
-
-# Initialize filter values in session state if not already present
-if 'current_time_window' not in st.session_state:
-    st.session_state['current_time_window'] = default_time_window
-
-# Check if the current decision logic index in session state is valid for the current options
-if 'current_decision_logic_index' not in st.session_state or st.session_state['current_decision_logic_index'] >= len(decision_logic_options) or st.session_state['current_decision_logic_index'] < 0:
-     st.session_state['current_decision_logic_index'] = default_decision_logic_index
-
-
-# Add time window input to the sidebar
-time_window_hours = st.sidebar.number_input(
-    "Display games within the next (hours):",
-    min_value=1,
-    max_value=168, # Allow up to 7 days
-    value=st.session_state['current_time_window'],
-    step=1,
-    key='time_window_input' # Keep the key
-)
-# Update session state when the input widget value changes
-st.session_state['current_time_window'] = time_window_hours
-
-
-# Add decision logic filter
-selected_decision_logic_filter = st.sidebar.selectbox(
-    "Filter by Decision Logic:",
-    decision_logic_options,
-    index=st.session_state['current_decision_logic_index'],
-    key='selected_decision_logic_filter' # Keep the key
-)
-# Update session state when the selectbox value changes
-st.session_state['current_decision_logic_index'] = decision_logic_options.index(selected_decision_logic_filter)
-
-
-# Add a state variable to trigger refresh
-if 'refresh_data' not in st.session_state:
-    st.session_state['refresh_data'] = False
-
-# Check if refresh button in sidebar is clicked
-if st.sidebar.button("Refresh Data"):
-    st.session_state['refresh_data'] = True
-
-
-# Fetch data when the sport changes or the refresh state is True
-if selected_sport and (st.session_state['refresh_data'] or 'df_picks' not in st.session_state or st.session_state['current_sport'] != selected_sport):
-    with st.spinner(f"Refreshing data for {selected_sport}... "):
-        df_picks_processed = fetch_and_process_data(selected_sport)
-        st.session_state['df_picks'] = df_picks_processed
-        st.session_state['current_sport'] = selected_sport
-        st.session_state['refresh_data'] = False # Reset refresh state
-        st.session_state['last_updated'] = datetime.now(pytz.timezone('America/Los_Angeles')).strftime('%Y-%m-%d %I:%M:%S %p %Z')
-
-
-# Access the dataframe from session state
-df_picks_filtered = st.session_state.get('df_picks', pd.DataFrame())
-
-# Display last updated time
-if 'last_updated' in st.session_state and not df_picks_filtered.empty:
-    st.info(f"Last updated: {st.session_state['last_updated']}")
-
-# Define a function to apply color highlights to the Betting Category column
-def highlight_betting_category(row):
-    styles = [''] * len(row.index) # Initialize a list of empty styles for each cell in the row
-    decision_logic = row.get('Decision Logic')
-    confidence_label = row.get('Confidence Score Label')
-
-    # Find the index of the 'Betting Category' column
-    try:
-        betting_category_col_index = row.index.get_loc('Betting Category')
-    except KeyError:
-        # If 'Betting Category' column is not present, return empty styles
-        return styles
-
-    # Apply green for all sharp confidence labels
-    if confidence_label in ["🔥🔥 Extreme Sharp Play", "🔒 Verified Sharp Play", "💎 Strong Sharp", "📈 Medium Sharp", "📊 Slight Sharp"]:
-        styles[betting_category_col_index] = 'background-color: #28a745; color: white;'
-    # Apply red for all public/fade confidence labels
-    elif confidence_label in ["🚨 Strong Public", "⚠️ Public-lean bias", "⬇️ Slight Public"]:
-        styles[betting_category_col_index] = 'background-color: #dc3545; color: white;'
-    # Apply grey for neutral/no signal, checking both confidence and decision logic if not covered by other confidence labels
-    elif confidence_label == "⚖️ Neutral" or decision_logic == '🤷‍♂️ No Signal' or decision_logic == 'Neutral':
-        styles[betting_category_col_index] = 'background-color: #6c757d; color: white;'
-
-    return styles
-
-# Define a function to apply color highlights to Decision Logic and Confidence Score Label (tuned for dark mode)
-def color_logic_labels(val):
-    if isinstance(val, str):
-        # Green for sharp signals
-        if val in ['🔒 Sharp Money Play', '🔒 Verified Sharp Play', '🔥🔥 Extreme Sharp Play', '💎 Strong Sharp', '📈 Medium Sharp', '📊 Slight Sharp']:
-            return 'background-color: #28a745; color: white;' # Greenish for sharp/verified sharp
-        # Red for public/fade signals
-        elif val in ['🚫 Public Trap (Fade)', '⚠️ Public-lean bias', '⬇️ Slight Public', '🚨 Strong Public']:
-            return 'background-color: #dc3545; color: white;' # Reddish for fade/public bias
-        # Gray for no signal/neutral
-        elif val in ['🤷‍♂️ No Signal', 'Neutral', '⚖️ Neutral']:
-            return 'background-color: #6c757d; color: white;' # Grayish for no signal
-    return '' # No highlight for other values
-
-
-# Get the current time in the appropriate timezone (America/Los_Angeles)
-pst = pytz.timezone('America/Los_Angeles')
-current_time_pst = datetime.now(pst)
-
-# Calculate the start time for filtering (15 minutes in the past)
-start_time_pst = current_time_pst - timedelta(minutes=15)
-
-# Calculate the end time for filtering (selected hours in the future)
-end_time_pst = current_time_pst + timedelta(hours=time_window_hours)
-
-# Filter the DataFrame based on the selected Decision Logic filter and time window
-df_filtered_by_time_and_thresholds = pd.DataFrame() # Initialize to empty DataFrame
-
-if not df_picks_filtered.empty:
-    # Check if required columns exist before filtering
-    required_cols = ['Decision Logic', 'Confidence Score Label', 'Matchup Time']
-    if all(col in df_picks_filtered.columns for col in required_cols):
-        if selected_decision_logic_filter == 'High Confidence':
-            df_filtered_by_time_and_thresholds = df_picks_filtered[
-                (df_picks_filtered['Relative Differential'] > 1.5) & 
-                (df_picks_filtered['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
-                (df_picks_filtered['Matchup Time'] >= start_time_pst) & # Filter from 15 minutes ago
-                (df_picks_filtered['Matchup Time'] <= end_time_pst)
-            ].copy()
-        else: # 'All Picks'
-            df_filtered_by_time_and_thresholds = df_picks_filtered[
-                (df_picks_filtered['Matchup Time'].notna()) & # Ensure Matchup Time is not NaT
-                (df_picks_filtered['Matchup Time'] >= start_time_pst) & # Filter from 15 minutes ago
-                (df_picks_filtered['Matchup Time'] <= end_time_pst)
-            ].copy()
-
-        # Explicitly format 'Matchup Time' column to string before displaying, only if DataFrame is not empty
-        if not df_filtered_by_time_and_thresholds.empty:
-            df_filtered_by_time_and_thresholds['Matchup Time'] = df_filtered_by_time_and_thresholds['Matchup Time'].apply(
-                lambda x: x.strftime('%m/%d %I:%M%p').replace('AM', 'am').replace('PM', 'pm') if pd.notnull(x) else 'N/A'
-            )
-    else:
-        st.warning("Required columns for filtering ('Decision Logic', 'Confidence Score Label', or 'Matchup Time') not found in the data.")
-
-
-# Display data based on filtering results
-if not df_picks_filtered.empty:
-    if not df_filtered_by_time_and_thresholds.empty:
-        st.subheader(f"{selected_decision_logic_filter} for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours (including games started in the last 15 minutes)")
-        
-        # Apply color highlighting: apply for Betting Category (row-wise) and map for the other two (element-wise)
-        styled_df = df_filtered_by_time_and_thresholds.style.apply(highlight_betting_category, axis=1)
-        styled_df = styled_df.map(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
-        
-        st.dataframe(styled_df)
-
-        # Only display separate categories if 'All Picks' is selected for Decision Logic
-        if selected_decision_logic_filter == 'All Picks':
-            st.subheader(f"Moneyline Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria (including games started in the last 15 minutes)")
-            df_moneyline_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Moneyline'].copy()
-            if not df_moneyline_picks.empty:
-                 styled_moneyline_df = df_moneyline_picks.style.apply(highlight_betting_category, axis=1)
-                 styled_moneyline_df = styled_moneyline_df.map(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
-                 st.dataframe(styled_moneyline_df)
-            else:
-                st.write(f"No Moneyline picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
-
-            st.subheader(f"Spread Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria (including games started in the last 15 minutes)")
-            df_spread_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Spread'].copy()
-            if not df_spread_picks.empty:
-                styled_spread_df = df_spread_picks.style.apply(highlight_betting_category, axis=1)
-                styled_spread_df = styled_spread_df.map(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
-                st.dataframe(styled_spread_df)
-            else:
-                st.write(f"No Spread picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
-
-            st.subheader(f"Total Picks for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours meeting criteria (including games started in the last 15 minutes)")
-            df_total_picks = df_filtered_by_time_and_thresholds[df_filtered_by_time_and_thresholds['Betting Category'] == 'Total'].copy()
-            if not df_total_picks.empty:
-                 styled_total_df = df_total_picks.style.apply(highlight_betting_category, axis=1)
-                 styled_total_df = styled_total_df.map(color_logic_labels, subset=['Decision Logic', 'Confidence Score Label']).hide(axis='index')
-                 st.dataframe(styled_total_df)
-            else:
-                st.write(f"No Total picks found meeting the filter criteria for {st.session_state.get('current_sport', 'Selected Sport')} within the next {time_window_hours} hours.")
-
-    else:
-         st.info(f"No picks found for {st.session_state.get('current_sport', 'Selected Sport')} meeting the filter criteria within the next {time_window_hours} hours (including games started in the last 15 minutes).")
-else:
-    st.write(f"No games scheduled for {selected_sport} today.")
-
-
-# Check if refresh button at the bottom is clicked
-main_page_refresh_button = st.button("Refresh Data")
-if main_page_refresh_button:
-    st.session_state['refresh_data'] = True
-    st.rerun() # Use st.rerun() to trigger a rerun of the app to fetch new data
+        data = fetch_data(sport)
+    except requests.RequestException as exc:
+        st.error(f"Could not load ScoresAndOdds: {exc}")
+        return
+    if data.empty:
+        st.info("No consensus cards were available for this sport.")
+        return
+    now = datetime.now(PACIFIC)
+    data = data[(data["Money minus Bets gap"].fillna(-999) >= min_gap) & (data["Bets %"].fillna(101) <= max_tickets)]
+    if market != "All":
+        data = data[data["Market"] == market]
+    data = data[data["Start time"].isna() | ((data["Start time"] >= now) & (data["Start time"] <= now + timedelta(hours=hours)))]
+    if require_price:
+        data = data[data["Best price"].notna()]
+    data = add_session_movement(data).sort_values(["Start time", "Money minus Bets gap"], ascending=[True, False])
+    st.caption("Session movement compares this browser session only; it is not persistent historical backtesting.")
+    st.dataframe(data, use_container_width=True, hide_index=True, column_config={
+        "Start time": st.column_config.DatetimeColumn(format="MMM D, h:mm a"),
+        "Last refresh time": st.column_config.DatetimeColumn(format="MMM D, h:mm:ss a"),
+    })
+
+
+if __name__ == "__main__":
+    main()
