@@ -273,10 +273,14 @@ def render_history() -> None:
     """Persistent-history view; conclusions stay descriptive at small samples."""
     st.divider()
     st.header("History / Performance")
-    if not os.getenv("DATABASE_URL") and (os.getenv("STREAMLIT_SHARING_MODE") or os.getenv("STREAMLIT_CLOUD")):
-        st.warning("History unavailable: configure DATABASE_URL in Streamlit Community Cloud secrets. The live scanner remains available.")
+    if not os.getenv("DATABASE_URL"):
+        st.warning("History unavailable: configure DATABASE_URL.")
         return
-    store = HistoryStore()
+    try:
+        store = HistoryStore(production=True)
+    except Exception as exc:
+        st.warning(f"History unavailable: database connection failed ({exc}).")
+        return
     snapshots = store.snapshots()
     rows = store.analytics_rows()
     metrics = performance(rows)

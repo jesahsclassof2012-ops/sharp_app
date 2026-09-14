@@ -46,3 +46,24 @@ def test_missing_start_and_priceless_rows_are_excluded_from_production_baseline(
 
 def test_postgres_row_conversion_abstraction_is_dict_like():
     store=HistoryStore("sqlite:///:memory:"); store.insert_snapshot(item()); assert isinstance(store.snapshots()[0],dict)
+
+def test_single_snapshot_has_no_invented_clv():
+    store=HistoryStore("sqlite:///:memory:"); entry=item(); store.insert_snapshot(entry); store.record_game_result("NFL","DEN vs KC",entry["event_start_utc"],24,20)
+    assert store.analytics_rows()[0]["clv"] is None
+
+def test_later_executable_close_can_be_equal_or_changed():
+    store=HistoryStore("sqlite:///:memory:"); entry=item(best_line="+3"); equal=item(observed_at_utc="2026-09-13T01:00:00Z",best_line="+3")
+    store.insert_snapshots([entry,equal]); store.record_game_result("NFL","DEN vs KC",entry["event_start_utc"],24,20)
+    assert store.analytics_rows()[0]["clv"]==0
+    store=HistoryStore("sqlite:///:memory:"); changed=item(best_line="+3"); close=item(observed_at_utc="2026-09-13T01:00:00Z",best_line="+2.5")
+    store.insert_snapshots([changed,close]); store.record_game_result("NFL","DEN vs KC",changed["event_start_utc"],24,20)
+    assert store.analytics_rows()[0]["clv"]==0.5
+
+def test_invalid_later_quote_does_not_become_closing_line():
+    store=HistoryStore("sqlite:///:memory:"); entry=item(best_line="+3"); invalid=item(observed_at_utc="2026-09-13T01:00:00Z",best_line="+2.5",best_price=None)
+    store.insert_snapshots([entry,invalid]); store.record_game_result("NFL","DEN vs KC",entry["event_start_utc"],24,20)
+    assert store.analytics_rows()[0]["clv"] is None
+
+def test_opposite_side_negative_gap_is_not_a_second_baseline_wager():
+    store=HistoryStore("sqlite:///:memory:"); positive=item(selection="DEN",money_minus_bets_gap=20); negative=item(selection="KC",selection_side="home",money_minus_bets_gap=-20)
+    store.insert_snapshots([positive,negative]); assert len(store.baseline_entries())==1

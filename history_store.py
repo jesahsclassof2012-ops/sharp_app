@@ -103,6 +103,13 @@ def is_valid_pregame(row: dict[str, Any], at: Optional[datetime] = None) -> bool
 
 
 def baseline_eligible(row: dict[str, Any]) -> bool:
+    if not executable_pregame(row): return False
+    if row.get("money_minus_bets_gap") is None or row["money_minus_bets_gap"] <= 0: return False
+    return True
+
+
+def executable_pregame(row: dict[str, Any]) -> bool:
+    """A quote eligible to serve as a genuine pregame entry or closing quote."""
     if not is_valid_pregame(row) or row.get("data_quality") != "OK" or row.get("best_price") is None: return False
     return row.get("market") == "Moneyline" or line_value(row.get("best_line")) is not None
 
@@ -149,8 +156,8 @@ class HistoryStore:
     def results(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM results"))
     def signal_snapshots(self, signal:str) -> list[dict[str,Any]]: return [x for x in self.snapshots() if x["signal_key"]==signal and is_valid_pregame(x)]
     def first_current_close(self, signal:str, at:Optional[datetime]=None) -> dict[str,Optional[dict[str,Any]]]:
-        rows=self.signal_snapshots(signal); current=[x for x in rows if is_valid_pregame(x,at)]
-        return {"first": min(rows,key=lambda x:x["observed_at_utc"]) if rows else None,"current":max(current,key=lambda x:x["observed_at_utc"]) if current else None,"close":max(rows,key=lambda x:x["observed_at_utc"]) if rows else None}
+        rows=self.signal_snapshots(signal); current=[x for x in rows if is_valid_pregame(x,at)]; quotes=[x for x in rows if executable_pregame(x)]
+        return {"first": min(rows,key=lambda x:x["observed_at_utc"]) if rows else None,"current":max(current,key=lambda x:x["observed_at_utc"]) if current else None,"close":max(quotes,key=lambda x:x["observed_at_utc"]) if quotes else None}
     def baseline_entries(self) -> list[dict[str,Any]]:
         groups={}
         for row in self.snapshots():
@@ -162,7 +169,9 @@ class HistoryStore:
             result=scores.get(entry["game_key"])
             if not result: continue
             close=self.first_current_close(entry["signal_key"])["close"]
-            row=dict(entry); row["bet_result"]=settle_selection(row["market"],row.get("selection_side") or "",line_value(row.get("best_line")),result["away_score"],result["home_score"]); row["clv"]=calculate_clv(row["market"],row.get("selection_side") or "",line_value(row.get("best_line")),line_value(close.get("best_line")) if close else None,row.get("best_price"),close.get("best_price") if close else None); output.append(row)
+            row=dict(entry); row["bet_result"]=settle_selection(row["market"],row.get("selection_side") or "",line_value(row.get("best_line")),result["away_score"],result["home_score"])
+            row["clv"]=calculate_clv(row["market"],row.get("selection_side") or "",line_value(row.get("best_line")),line_value(close.get("best_line")),row.get("best_price"),close.get("best_price")) if close and close["observed_at_utc"] > entry["observed_at_utc"] else None
+            output.append(row)
         return output
 
 
