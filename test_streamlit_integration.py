@@ -95,6 +95,25 @@ def test_missing_event_identity_is_a_data_quality_issue():
     assert data["Data quality"].str.contains("missing matchup").all()
 
 
+def test_pickem_card_class_is_spread_and_keeps_spread_quotes():
+    html = '''<div class="trend-card consensus consensus-table-spread--0 active">
+      <div class="event-header"><span class="team-name">Denver</span><span class="team-name">Kansas City</span></div>
+      <span class="trend-graph-chart"><span class="trend-graph-sides"><strong>DEN (PK)</strong><span>% of Bets</span><strong>KC (PICK)</strong></span>
+      <span class="trend-graph-percentage"><span>48%</span><span>52%</span></span><span class="trend-graph-percentage"><span>55%</span><span>45%</span></span></span>
+      <span class="best-odds"><div class="best-odds-container"><span>Best away Odds</span><span class="data-moneyline">PK</span><small class="data-odds best">-110</small></div>
+      <div class="best-odds-container"><span>Best home Odds</span><span class="data-moneyline">PICK</span><small class="data-odds best">even</small></div></span></div>'''
+    data = streamlit_app.parse_scoresandodds_html(html, datetime.now(timezone.utc))
+    assert set(data["Market"]) == {"Spread"}
+    assert list(data["Split line"]) == ["0 / 0", "0 / 0"]
+    assert list(data["Selection"]) == ["DEN", "KC"]
+    assert list(data["Best line"]) == ["PK", "PICK"]
+    assert list(data["Best price"]) == [-110, 100]
+
+
+def test_pickem_side_text_is_spread_without_market_class():
+    assert streamlit_app.label_market("% of Bets", ["DEN (PK)", "KC (PICK'EM)"]) == "Spread"
+
+
 def test_fetch_data_cache_keeps_actual_fetch_timestamp(monkeypatch):
     calls = []
 

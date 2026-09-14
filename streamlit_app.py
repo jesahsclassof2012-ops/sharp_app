@@ -64,11 +64,19 @@ def team_code_from_text(value: str) -> Optional[str]:
     return None if flags.malformed_team_code else code
 
 
-def label_market(label: str, teams: list[str]) -> str:
+def label_market(label: str, teams: list[str], card_classes: list[str] | None = None) -> str:
+    """Classify a trend card, preferring ScoresAndOdds' market-class metadata."""
+    class_text = " ".join(card_classes or ()).lower()
+    if "consensus-table-spread" in class_text:
+        return "Spread"
+    if "consensus-table-moneyline" in class_text:
+        return "Moneyline"
+    if "consensus-table-total" in class_text:
+        return "Total"
     text = f"{label} {' '.join(teams)}".lower()
     if "total" in text or re.search(r"\b[ou]\d+(?:\.\d+)?", text):
         return "Total"
-    if "spread" in text or any(re.search(r"[+-]\d", team) for team in teams):
+    if "spread" in text or re.search(r"\b(?:pk|pick|pick'em)\b", text) or any(re.search(r"[+-]\d", team) for team in teams):
         return "Spread"
     return "Moneyline"
 
@@ -182,7 +190,7 @@ def parse_scoresandodds_html(html: str, refreshed_at: datetime) -> pd.DataFrame:
         team_texts = [item.get_text(" ", strip=True) for item in sides.select("strong")] if sides else []
         label_node = sides.select_one("span") if sides else None
         label = label_node.get_text(" ", strip=True) if label_node else ""
-        market = label_market(label, team_texts)
+        market = label_market(label, team_texts, card.get("class", []))
         codes = [team_code_from_text(team) for team in team_texts]
         card_flags = [parse_team_code(code)[1] for code in codes if code]
         event_teams = [node.get_text(" ", strip=True) for node in card.select(".event-header .team-name")]
