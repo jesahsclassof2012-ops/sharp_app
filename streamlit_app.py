@@ -71,16 +71,21 @@ def label_market(label: str, teams: list[str]) -> str:
 
 
 def quote_from_container(container: Tag) -> tuple[Optional[str], Optional[int]]:
-    """Return the line text and American price from one S&O best-odds item."""
-    value = container.select_one("small.data-odds.best, span.data-moneyline, .data-odds")
-    text = value.get_text(" ", strip=True) if value else container.get_text(" ", strip=True)
-    # A total such as ``o46 -105`` contains two numbers; the signed trailing
-    # number is the price.  Fall back to the generic V2 odds parser for plain
-    # moneyline text (for example ``+120``).
-    signed_prices = re.findall(r"[+-]\d{2,5}\b", text)
-    odds, _ = parse_american_odds(signed_prices[-1] if signed_prices else text)
-    line_match = re.search(r"(?:[ou]\s*\d+(?:\.\d+)?)|(?:[+-]\d+(?:\.\d+)?)", text, re.I)
-    return (line_match.group(0).replace(" ", "") if line_match else None), odds
+    """Return separate executable line and American price from an S&O quote."""
+    # In the live page, line and price are distinct siblings: data-moneyline is
+    # the executable line and data-odds is the price.  Never infer one from the
+    # other just because both contain signed numbers.
+    line_node = container.select_one("span.data-moneyline")
+    price_node = container.select_one("small.data-odds.best, small.data-odds")
+    line = line_node.get_text(" ", strip=True).replace(" ", "") if line_node else None
+    price_text = price_node.get_text(" ", strip=True) if price_node else None
+    # Moneyline cards have no point/total line.  Their data-moneyline value is
+    # itself the executable American price, unlike spread and total cards.
+    if price_text is None:
+        price, _ = parse_american_odds(line or "N/A")
+        return None, price
+    price, _ = parse_american_odds(price_text or "N/A")
+    return line, price
 
 
 def best_quotes(card: Tag) -> dict[str, tuple[Optional[str], Optional[int]]]:
@@ -125,6 +130,12 @@ def quality_text(*flags: Any) -> str:
     return "; ".join(sorted(set(issues))) or "OK"
 
 
+def line_number(value: Optional[str]) -> Optional[float]:
+    """Extract the numeric portion of one spread or total line."""
+    match = re.search(r"(?:[ou]\s*)?([+-]?\d+(?:\.\d+)?)", value or "", re.I)
+    return float(match.group(1)) if match else None
+
+
 def parse_scoresandodds_html(html: str, refreshed_at: datetime) -> pd.DataFrame:
     """Convert S&O trend cards to one transparent row per selectable side.
 
@@ -144,9 +155,10 @@ def parse_scoresandodds_html(html: str, refreshed_at: datetime) -> pd.DataFrame:
         label = label_node.get_text(" ", strip=True) if label_node else ""
         market = label_market(label, team_texts)
         codes = [team_code_from_text(team) for team in team_texts]
-        card_flags = [parse_team_code(code or "")[1] for code in codes]
+        card_flags = [parse_team_code(code)[1] for code in codes if code]
+        event_teams = [node.get_text(" ", strip=True) for node in card.select(".event-header .team-name")]
         matchup_node = card.select_one(".event-matchup, .trend-card-title, [data-role='matchup']")
-        matchup = matchup_node.get_text(" ", strip=True) if matchup_node else " vs ".join(c for c in codes if c)
+        matchup = matchup_node.get_text(" ", strip=True) if matchup_node else " vs ".join(event_teams or [c for c in codes if c])
         if not matchup:
             matchup = "Unidentified matchup"
 
@@ -182,11 +194,11 @@ def parse_scoresandodds_html(html: str, refreshed_at: datetime) -> pd.DataFrame:
                     if best_total is not None and split_total is not None:
                         line_vs_split = f"{best_total - split_total:+g}"
                 elif market == "Spread":
-                    best_spread, _ = parse_spread(best_line)
                     split_spread, _ = parse_spread(current_split)
                     side = 0 if quote_key == "away" else 1
-                    if best_spread and split_spread:
-                        line_vs_split = f"{best_spread[side] - split_spread[side]:+g}"
+                    best_value = line_number(best_line)
+                    if best_value is not None and split_spread:
+                        line_vs_split = f"{best_value - split_spread[side]:+g}"
             rows.append({
                 "Matchup": matchup, "Start time": format_start(card), "Market": market,
                 "Selection": selection, "Bets %": bets, "Money %": money,
