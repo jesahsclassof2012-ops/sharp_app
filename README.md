@@ -22,9 +22,9 @@ scanner remains available. SQLite fallback is only for local development.
 ## Automated result ingestion
 
 `result_collector.py` settles results from ESPN's full date-scoped scoreboard:
-`https://site.web.api.espn.com/apis/site/v2/sports/football/{nfl|college-football}/scoreboard?dates=YYYYMMDD&limit=500`.
-The NCAAF query is a league-wide date listing, not a Top 25, ranked, or
-featured-games feed. The collector requests the stored UTC date plus adjacent
+`https://site.web.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=YYYYMMDD&limit=500` and, for NCAAF, the explicit union of
+`.../college-football/scoreboard?dates=YYYYMMDD&limit=500&groups=80` (FBS)
+and `...&groups=81` (FCS). The collector requests the stored UTC date plus adjacent
 dates, then deduplicates provider events by `(sport, external_event_id)`.
 Conflicting duplicate copies fail the run rather than choosing a result.
 

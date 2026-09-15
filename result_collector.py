@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import re
 from typing import Any, Iterable
 import requests
-from history_store import normalize_utc
+from history_store import HistoryStore, normalize_utc
 
 SCOREBOARD_BASE = "https://site.web.api.espn.com/apis/site/v2/sports/football"
 LEAGUES = {"NFL": "nfl", "NCAAF": "college-football"}
@@ -91,10 +91,18 @@ def fetch_events_for_date(sport: str, date: Any) -> list[dict[str,Any]]:
     if isinstance(date,datetime): date=date.astimezone(timezone.utc).strftime("%Y%m%d")
     elif hasattr(date,"strftime"): date=date.strftime("%Y%m%d")
     elif not re.fullmatch(r"\d{8}",str(date)): raise ValueError("date must be YYYYMMDD")
-    listing=fetch_json(f"{SCOREBOARD_BASE}/{LEAGUES[sport]}/scoreboard?dates={date}&limit=500"); events=listing.get("events")
-    if not isinstance(events,list): raise ValueError("ESPN scoreboard is missing events")
-    if any(not isinstance(event,dict) for event in events): raise ValueError("ESPN scoreboard has malformed event")
-    return [parse_event(event,sport) for event in events]
+    # ESPN's default college-football board was empirically only group 80 on a
+    # full Saturday. Query both FBS (80) and FCS (81); collector-level event
+    # deduplication checks overlapping IDs for conflicts.
+    groups=("80","81") if sport=="NCAAF" else (None,)
+    parsed=[]
+    for group in groups:
+        suffix=f"&groups={group}" if group else ""
+        listing=fetch_json(f"{SCOREBOARD_BASE}/{LEAGUES[sport]}/scoreboard?dates={date}&limit=500{suffix}"); events=listing.get("events")
+        if not isinstance(events,list): raise ValueError("ESPN scoreboard is missing events")
+        if any(not isinstance(event,dict) for event in events): raise ValueError("ESPN scoreboard has malformed event")
+        parsed.extend(parse_event(event,sport) for event in events)
+    return parsed
 
 def provider_dates_for_games(games: Iterable[dict[str,Any]]) -> list[str]:
     dates=set()
@@ -151,7 +159,7 @@ def collect_results(store: HistoryStore, fetcher=fetch_events_for_date, now: dat
             continue
         summary["matched_finals"]+=1
         changed=is_recent and (game["away_score"]!=event["away_score"] or game["home_score"]!=event["home_score"])
-        store.record_game_result(game["sport"],game["matchup"],game["event_start_utc"],event["away_score"],event["home_score"],result_source="espn_core",external_event_id=event["external_event_id"],source_status=event["source_status"])
+        store.record_game_result(game["sport"],game["matchup"],game["event_start_utc"],event["away_score"],event["home_score"],result_source="espn_scoreboard",external_event_id=event["external_event_id"],source_status=event["source_status"])
         if is_recent:
             if changed: summary["corrected_results_updated"]+=1
         else: summary["new_results_recorded"]+=1
@@ -163,3 +171,6 @@ def format_summary(summary: dict[str,int]) -> str:
 def main() -> None:
     clear_run_fetch_cache()
     print(format_summary(collect_results(HistoryStore(production=True))))
+
+if __name__ == "__main__":
+    main()

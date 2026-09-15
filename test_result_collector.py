@@ -1,6 +1,10 @@
 import pytest
 import result_collector as rc
 from history_store import HistoryStore
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 def team(abbr, display=None): return {"id":abbr,"abbreviation":abbr,"displayName":display or abbr,"shortDisplayName":display or abbr}
 def event(event_id="1", status=None, away="DEN", home="KC", date="2026-09-01T20:00:00Z", scores=("20","17")):
@@ -17,7 +21,9 @@ def test_discovery_nfl_and_ncaaf_date_requests(monkeypatch):
     monkeypatch.setattr(rc,"fetch_json",fake)
     assert rc.fetch_events_for_date("NFL","20260901")[0]["sport"]=="NFL"
     assert rc.fetch_events_for_date("NCAAF","20260901")[0]["sport"]=="NCAAF"
-    assert any("/nfl/scoreboard?dates=20260901" in x for x in urls) and any("/college-football/scoreboard?dates=20260901" in x for x in urls)
+    assert any("/nfl/scoreboard?dates=20260901" in x for x in urls)
+    assert any("/college-football/scoreboard?dates=20260901" in x and "groups=80" in x for x in urls)
+    assert any("/college-football/scoreboard?dates=20260901" in x and "groups=81" in x for x in urls)
 
 def test_discovery_malformed_listing_fails_and_empty_slate_is_valid(monkeypatch):
     monkeypatch.setattr(rc,"fetch_json",lambda url: {"events":[]}); assert rc.fetch_events_for_date("NFL","20260901")==[]
@@ -105,6 +111,7 @@ def run(store, events):
 def test_collector_writes_only_matched_final_unresolved_game():
     store=FakeStore([game()]); summary=run(store,[parsed()])
     assert len(store.writes)==1 and summary["new_results_recorded"]==1 and summary["matched_finals"]==1
+    assert store.writes[0][1]["result_source"]=="espn_scoreboard"
 
 @pytest.mark.parametrize("status",["scheduled","in_progress","postponed","cancelled","suspended","unknown"])
 def test_collector_never_writes_nonfinal_matches(status):
@@ -163,3 +170,17 @@ def test_run_level_ref_cache_avoids_duplicate_http_calls(monkeypatch):
 def test_summary_has_no_credentials():
     text=rc.format_summary({"unresolved_checked":1,"recent_rechecked":2,"provider_events_fetched":3,"matched_finals":4,"new_results_recorded":5,"corrected_results_updated":6,"not_final_skipped":7,"unmatched_skipped":8,"ambiguous_skipped":9,"incomplete_identity_skipped":10})
     assert "DATABASE_URL" not in text and "password" not in text.lower()
+
+def test_main_has_historystore_and_invokes_collector(monkeypatch, capsys):
+    store=FakeStore(); calls=[]
+    monkeypatch.setattr(rc,"HistoryStore",lambda production: calls.append(production) or store)
+    monkeypatch.setattr(rc,"collect_results",lambda supplied: {"unresolved_checked":0,"recent_rechecked":0,"provider_events_fetched":0,"matched_finals":0,"new_results_recorded":0,"corrected_results_updated":0,"not_final_skipped":0,"unmatched_skipped":0,"ambiguous_skipped":0,"incomplete_identity_skipped":0} if supplied is store else None)
+    rc.main()
+    assert calls==[True] and "Checked 0 unresolved games." in capsys.readouterr().out
+
+def test_script_entrypoint_runs_and_missing_database_url_fails():
+    environment=dict(os.environ); environment.pop("DATABASE_URL",None)
+    script=Path(rc.__file__)
+    result=subprocess.run([sys.executable,str(script)],cwd=script.parent,env=environment,capture_output=True,text=True,timeout=30)
+    assert result.returncode != 0
+    assert "DATABASE_URL" in (result.stdout+result.stderr)
