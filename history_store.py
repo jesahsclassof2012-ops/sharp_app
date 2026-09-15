@@ -163,7 +163,25 @@ class HistoryStore:
         fields = "game_key,signal_key,observed_at_utc,sport,matchup,event_start_utc,market,selection,selection_side,split_line,bets_pct,money_pct,money_minus_bets_gap,best_line,best_price,break_even_pct,data_quality,line_vs_split".split(",")
         values = [game,signal,item["observed_at_utc"],item["sport"],item["matchup"],start] + [item.get(name) for name in fields[6:]]
         cur=self.execute(f"INSERT INTO snapshots ({','.join(fields)}) VALUES ({','.join([self.p]*len(fields))}) ON CONFLICT(signal_key,observed_at_utc) DO NOTHING",values); self.connection.commit(); return cur.rowcount > 0
-    def insert_snapshots(self, items: Iterable[dict[str, Any]]) -> int: return sum(self.insert_snapshot(item) for item in items)
+    def insert_snapshots(self, items: Iterable[dict[str, Any]]) -> int:
+        """Commit snapshots independently and retain safe context if one fails."""
+        inserted = 0
+        for item in items:
+            try:
+                inserted += self.insert_snapshot(item)
+            except Exception as exc:
+                numeric_types = {
+                    field: type(item.get(field)).__name__
+                    for field in ("bets_pct", "money_pct", "money_minus_bets_gap", "best_price", "break_even_pct")
+                    if item.get(field) is not None
+                }
+                raise RuntimeError(
+                    "Snapshot insert failed "
+                    f"sport={item.get('sport')} matchup={item.get('matchup')} "
+                    f"market={item.get('market')} selection={item.get('selection')} "
+                    f"numeric_types={numeric_types}"
+                ) from exc
+        return inserted
     def record_game_result(self, sport:str, matchup:str, event_start_utc:Any, away_score:int, home_score:int, settled_at_utc:Optional[str]=None, result_source=None, external_event_id=None, source_status=None) -> None:
         start=normalize_utc(event_start_utc); game=game_key(sport,matchup,start)
         fetched_at=normalize_utc(datetime.now(timezone.utc)); settled=normalize_utc(settled_at_utc or fetched_at)
