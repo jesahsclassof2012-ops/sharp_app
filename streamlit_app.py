@@ -397,6 +397,7 @@ def main() -> None:
         require_price = st.checkbox("Require current best price", value=True, key="filter_price")
         if st.button("Refresh data", use_container_width=True, key="refresh_data"):
             fetch_data.clear()
+    st.caption(active_filter_summary(sport, market, hours))
     try:
         data = fetch_data(sport)
     except requests.RequestException as exc:
@@ -418,7 +419,6 @@ def main() -> None:
     if st.session_state.get("sharp_cards_filter_signature") != signature:
         st.session_state["sharp_cards_filter_signature"] = signature
         st.session_state["sharp_cards_shown"] = 20
-    st.caption(active_filter_summary(sport, market, hours))
     if data.empty:
         st.info("No matching signals for these filters. Expand Filters to adjust the screen.")
         render_history()
