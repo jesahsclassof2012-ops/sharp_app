@@ -5,7 +5,7 @@ import hashlib
 import os
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -166,18 +166,34 @@ class HistoryStore:
     def insert_snapshots(self, items: Iterable[dict[str, Any]]) -> int: return sum(self.insert_snapshot(item) for item in items)
     def record_game_result(self, sport:str, matchup:str, event_start_utc:Any, away_score:int, home_score:int, settled_at_utc:Optional[str]=None, result_source=None, external_event_id=None, source_status=None) -> None:
         start=normalize_utc(event_start_utc); game=game_key(sport,matchup,start)
-        now=datetime.now(timezone.utc).isoformat(); self.execute(f"INSERT INTO results (game_key,sport,matchup,event_start_utc,away_score,home_score,settled_at_utc,result_source,external_event_id,source_status,result_fetched_at_utc) VALUES ({','.join([self.p]*11)}) ON CONFLICT(game_key) DO UPDATE SET away_score=excluded.away_score,home_score=excluded.home_score,settled_at_utc=excluded.settled_at_utc,result_source=excluded.result_source,external_event_id=excluded.external_event_id,source_status=excluded.source_status,result_fetched_at_utc=excluded.result_fetched_at_utc",(game,sport,matchup,start,away_score,home_score,settled_at_utc or now,result_source,external_event_id,source_status,now)); self.connection.commit()
+        fetched_at=normalize_utc(datetime.now(timezone.utc)); settled=normalize_utc(settled_at_utc or fetched_at)
+        self.execute(f"INSERT INTO results (game_key,sport,matchup,event_start_utc,away_score,home_score,settled_at_utc,result_source,external_event_id,source_status,result_fetched_at_utc) VALUES ({','.join([self.p]*11)}) ON CONFLICT(game_key) DO UPDATE SET away_score=excluded.away_score,home_score=excluded.home_score,result_source=COALESCE(excluded.result_source,results.result_source),external_event_id=COALESCE(excluded.external_event_id,results.external_event_id),source_status=COALESCE(excluded.source_status,results.source_status),result_fetched_at_utc=excluded.result_fetched_at_utc",(game,sport,matchup,start,away_score,home_score,settled,result_source,external_event_id,source_status,fetched_at)); self.connection.commit()
     def snapshots(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM snapshots ORDER BY observed_at_utc"))
     def results(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM results"))
     def unresolved_games(self, now=None) -> list[dict[str,Any]]:
-        now=(now or datetime.now(timezone.utc)).isoformat()
-        sql="SELECT s.game_key,s.sport,s.matchup,s.event_start_utc,MAX(CASE WHEN s.selection_side='away' AND s.market<>'Total' THEN s.selection END) away_team,MAX(CASE WHEN s.selection_side='home' AND s.market<>'Total' THEN s.selection END) home_team FROM snapshots s LEFT JOIN results r ON r.game_key=s.game_key WHERE r.game_key IS NULL AND s.event_start_utc < ? GROUP BY s.game_key,s.sport,s.matchup,s.event_start_utc"
-        return self.rows(self.execute(sql,(now,)))
+        boundary=normalize_utc(now or datetime.now(timezone.utc))
+        sql=self._game_identity_query("s.game_key,s.sport,s.matchup,s.event_start_utc", "LEFT JOIN results r ON r.game_key=s.game_key", "r.game_key IS NULL")
+        # Normalize on read as well as write: old TEXT rows may use +00:00 rather than Z.
+        return [row for row in self.rows(self.execute(sql)) if normalize_utc(row["event_start_utc"]) < boundary]
     def recently_settled_games(self, now=None, correction_hours=48) -> list[dict[str,Any]]:
-        from datetime import timedelta
-        cutoff=((now or datetime.now(timezone.utc))-timedelta(hours=correction_hours)).isoformat()
-        sql="SELECT r.*,MAX(CASE WHEN s.selection_side='away' AND s.market<>'Total' THEN s.selection END) away_team,MAX(CASE WHEN s.selection_side='home' AND s.market<>'Total' THEN s.selection END) home_team FROM results r LEFT JOIN snapshots s ON s.game_key=r.game_key WHERE r.settled_at_utc >= ? GROUP BY r.game_key"
-        return self.rows(self.execute(sql,(cutoff,)))
+        cutoff=normalize_utc((now or datetime.now(timezone.utc))-timedelta(hours=correction_hours))
+        # The identity CTE is one row per game, so PostgreSQL never has to group r.*.
+        sql=self._game_identity_query("r.*", "JOIN results r ON r.game_key=i.game_key", "1=1", identity_first=True)
+        return [row for row in self.rows(self.execute(sql)) if normalize_utc(row["settled_at_utc"]) >= cutoff]
+
+    def _game_identity_query(self, columns: str, join: str, where: str, identity_first: bool = False) -> str:
+        """Return a portable query with ambiguity-safe stored away/home identities."""
+        identity = """WITH team_identity AS (
+            SELECT game_key,
+              CASE WHEN COUNT(DISTINCT CASE WHEN selection_side='away' AND market<>'Total' AND selection IS NOT NULL THEN selection END)=1
+                   THEN MIN(CASE WHEN selection_side='away' AND market<>'Total' AND selection IS NOT NULL THEN selection END) END AS away_team,
+              CASE WHEN COUNT(DISTINCT CASE WHEN selection_side='home' AND market<>'Total' AND selection IS NOT NULL THEN selection END)=1
+                   THEN MIN(CASE WHEN selection_side='home' AND market<>'Total' AND selection IS NOT NULL THEN selection END) END AS home_team
+            FROM snapshots GROUP BY game_key
+        ) """
+        if identity_first:
+            return f"{identity} SELECT {columns},i.away_team,i.home_team FROM team_identity i {join} WHERE {where}"
+        return f"{identity} SELECT {columns},i.away_team,i.home_team FROM snapshots s JOIN team_identity i ON i.game_key=s.game_key {join} WHERE {where} GROUP BY {columns},i.away_team,i.home_team"
     def signal_snapshots(self, signal:str) -> list[dict[str,Any]]: return [x for x in self.snapshots() if x["signal_key"]==signal and is_valid_pregame(x)]
     def first_current_close(self, signal:str, at:Optional[datetime]=None) -> dict[str,Optional[dict[str,Any]]]:
         rows=self.signal_snapshots(signal); current=[x for x in rows if is_valid_pregame(x,at)]; quotes=[x for x in rows if executable_pregame(x)]
