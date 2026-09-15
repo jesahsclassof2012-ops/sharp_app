@@ -169,3 +169,15 @@ def test_timestamp_normalization_makes_z_and_offset_boundaries_equivalent():
     store=HistoryStore("sqlite:///:memory:"); row=stored_game(store,"2026-09-01T20:00:00+00:00")
     store.record_game_result("NFL","DEN vs KC",row["event_start_utc"],1,2,settled_at_utc="2026-09-01T12:00:00+00:00")
     assert len(store.recently_settled_games(datetime(2026,9,2,tzinfo=timezone.utc)))==1
+
+def test_game_queries_filter_sports_and_routine_lookback_in_sql():
+    from datetime import datetime, timezone
+    store=HistoryStore("sqlite:///:memory:")
+    def snapshot(sport,start,selection):
+        observed="2026-07-30T00:00:00Z" if start.startswith("2026-08") else "2026-08-30T00:00:00Z"
+        return item(sport=sport,matchup=f"{sport} game",observed_at_utc=observed,event_start_utc=start,selection=selection,selection_side="away")
+    store.insert_snapshots([snapshot("NFL","2026-09-10T20:00:00Z","DEN"),snapshot("NCAAF","2026-09-10T20:00:00Z","TEX"),snapshot("NBA","2026-09-10T20:00:00Z","LAL"),snapshot("NFL","2026-08-01T20:00:00Z","BUF")])
+    now=datetime(2026,9,14,tzinfo=timezone.utc)
+    routine=store.unresolved_games(now,sports=("NFL","NCAAF"),lookback_days=14)
+    assert {row["sport"] for row in routine}=={"NFL","NCAAF"}
+    assert len(store.unresolved_games(now,sports=("NFL",),lookback_days=120))==2

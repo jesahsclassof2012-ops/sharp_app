@@ -101,8 +101,8 @@ def test_invalid_provider_kickoff_is_rejected():
 
 class FakeStore:
     def __init__(self, unresolved=(), recent=()): self.unresolved=list(unresolved); self.recent=list(recent); self.writes=[]
-    def unresolved_games(self, now=None): return self.unresolved
-    def recently_settled_games(self, now=None, correction_hours=48): assert correction_hours==48; return self.recent
+    def unresolved_games(self, now=None, sports=None, lookback_days=None): return self.unresolved
+    def recently_settled_games(self, now=None, correction_hours=48, sports=None): assert correction_hours==48; return self.recent
     def record_game_result(self, *args, **kwargs): self.writes.append((args,kwargs))
 
 def run(store, events):
@@ -151,7 +151,7 @@ def test_collector_correction_keeps_one_row_and_original_settlement_time():
 
 def test_outside_correction_window_is_not_rechecked():
     class WindowStore(FakeStore):
-        def recently_settled_games(self, now=None, correction_hours=48): return []
+        def recently_settled_games(self, now=None, correction_hours=48, sports=None): return []
     store=WindowStore(); summary=run(store,[parsed()]); assert summary["recent_rechecked"]==0 and store.writes==[]
 
 def test_provider_failures_and_malformed_events_fail_loudly():
@@ -174,8 +174,8 @@ def test_summary_has_no_credentials():
 def test_main_has_historystore_and_invokes_collector(monkeypatch, capsys):
     store=FakeStore(); calls=[]
     monkeypatch.setattr(rc,"HistoryStore",lambda production: calls.append(production) or store)
-    monkeypatch.setattr(rc,"collect_results",lambda supplied: {"unresolved_checked":0,"recent_rechecked":0,"provider_events_fetched":0,"matched_finals":0,"new_results_recorded":0,"corrected_results_updated":0,"not_final_skipped":0,"unmatched_skipped":0,"ambiguous_skipped":0,"incomplete_identity_skipped":0} if supplied is store else None)
-    rc.main()
+    monkeypatch.setattr(rc,"collect_results",lambda supplied,**kwargs: {"unresolved_checked":0,"recent_rechecked":0,"provider_events_fetched":0,"matched_finals":0,"new_results_recorded":0,"corrected_results_updated":0,"not_final_skipped":0,"unmatched_skipped":0,"ambiguous_skipped":0,"incomplete_identity_skipped":0} if supplied is store else None)
+    rc.main([])
     assert calls==[True] and "Checked 0 unresolved games." in capsys.readouterr().out
 
 def test_script_entrypoint_runs_and_missing_database_url_fails():
@@ -184,3 +184,24 @@ def test_script_entrypoint_runs_and_missing_database_url_fails():
     result=subprocess.run([sys.executable,str(script)],cwd=script.parent,env=environment,capture_output=True,text=True,timeout=30)
     assert result.returncode != 0
     assert "DATABASE_URL" in (result.stdout+result.stderr)
+
+def test_routine_collects_nfl_and_ncaaf_but_ignores_unsupported_sports():
+    ncaaf_event=rc.parse_event(event(),"NCAAF")
+    unsupported=[game(sport=sport) for sport in ("NBA","MLB","NHL","NCAAB")]
+    store=FakeStore([game(),game(sport="NCAAF"),*unsupported]); requests=[]
+    summary=rc.collect_results(store,lambda sport,date: requests.append(sport) or ([parsed()] if sport=="NFL" else [ncaaf_event]))
+    assert summary["unresolved_checked"]==2 and summary["new_results_recorded"]==2
+    assert set(requests)=={"NFL","NCAAF"} and summary["unmatched_skipped"]==0
+
+def test_routine_lookback_and_backfill_cli_arguments():
+    assert rc.parse_args([]).backfill_days is None
+    assert rc.parse_args(["--backfill-days","120"]).backfill_days==120
+    with pytest.raises(SystemExit): rc.parse_args(["--backfill-days","0"])
+    with pytest.raises(SystemExit): rc.parse_args(["--backfill-days","not-a-number"])
+
+def test_main_default_and_backfill_pass_explicit_safe_windows(monkeypatch):
+    store=FakeStore(); calls=[]
+    monkeypatch.setattr(rc,"HistoryStore",lambda production: store)
+    monkeypatch.setattr(rc,"collect_results",lambda supplied,**kwargs: calls.append(kwargs["unresolved_lookback_days"]) or {"unresolved_checked":0,"recent_rechecked":0,"provider_events_fetched":0,"matched_finals":0,"new_results_recorded":0,"corrected_results_updated":0,"not_final_skipped":0,"unmatched_skipped":0,"ambiguous_skipped":0,"incomplete_identity_skipped":0})
+    rc.main([]); rc.main(["--backfill-days","120"])
+    assert calls==[14,120]

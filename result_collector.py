@@ -1,5 +1,6 @@
 """Read-only ESPN scoreboard discovery, parsing, and deterministic matching."""
 from __future__ import annotations
+import argparse
 from datetime import datetime, timedelta, timezone
 import re
 from typing import Any, Iterable
@@ -8,6 +9,8 @@ from history_store import HistoryStore, normalize_utc
 
 SCOREBOARD_BASE = "https://site.web.api.espn.com/apis/site/v2/sports/football"
 LEAGUES = {"NFL": "nfl", "NCAAF": "college-football"}
+SUPPORTED_SPORTS = tuple(LEAGUES)
+ROUTINE_LOOKBACK_DAYS = 14
 TOLERANCE_SECONDS = 12 * 60 * 60
 HTTP_HEADERS = {"User-Agent": "SharpSignal/2.0"}
 _RUN_FETCH_CACHE: dict[str, dict[str, Any]] = {}
@@ -139,9 +142,13 @@ def match_stored_game(game: dict[str,Any], provider_events: Iterable[dict[str,An
         except (KeyError,TypeError,ValueError): continue
     return {"status":"matched","event":candidates[0]} if len(candidates)==1 else {"status":"ambiguous" if len(candidates)>1 else "unmatched","event":None}
 
-def collect_results(store: HistoryStore, fetcher=fetch_events_for_date, now: datetime | None = None) -> dict[str,int]:
+def collect_results(store: HistoryStore, fetcher=fetch_events_for_date, now: datetime | None = None, unresolved_lookback_days: int | None = ROUTINE_LOOKBACK_DAYS) -> dict[str,int]:
     """Perform one fail-closed settlement run; provider errors intentionally escape."""
-    unresolved=store.unresolved_games(now); recent=store.recently_settled_games(now,correction_hours=48)
+    unresolved=store.unresolved_games(now,sports=SUPPORTED_SPORTS,lookback_days=unresolved_lookback_days)
+    recent=store.recently_settled_games(now,correction_hours=48,sports=SUPPORTED_SPORTS)
+    # Defensive guard for non-HistoryStore implementations used by callers/tests.
+    unresolved=[game for game in unresolved if game.get("sport") in LEAGUES]
+    recent=[game for game in recent if game.get("sport") in LEAGUES]
     planned=unresolved+recent; raw_events=[]
     for sport in LEAGUES:
         sport_games=[game for game in planned if game.get("sport")==sport]
@@ -168,9 +175,18 @@ def collect_results(store: HistoryStore, fetcher=fetch_events_for_date, now: dat
 def format_summary(summary: dict[str,int]) -> str:
     return "\n".join((f"Checked {summary['unresolved_checked']} unresolved games.",f"Rechecked {summary['recent_rechecked']} recent results.",f"Fetched {summary['provider_events_fetched']} ESPN events.",f"Matched {summary['matched_finals']} final games.",f"Recorded {summary['new_results_recorded']} new results.",f"Updated {summary['corrected_results_updated']} corrected results.",f"Skipped {summary['not_final_skipped']} not final.",f"Skipped {summary['unmatched_skipped']} unmatched.",f"Skipped {summary['ambiguous_skipped']} ambiguous.",f"Skipped {summary['incomplete_identity_skipped']} incomplete identity."))
 
-def main() -> None:
+def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+    parser=argparse.ArgumentParser(description="Settle NFL/NCAAF Sharp Signal results.")
+    parser.add_argument("--backfill-days",type=int,metavar="DAYS",help="Expand unresolved-game discovery beyond the routine 14-day window.")
+    args=parser.parse_args(argv)
+    if args.backfill_days is not None and args.backfill_days <= 0: parser.error("--backfill-days must be a positive integer")
+    return args
+
+def main(argv: Iterable[str] | None = None) -> None:
+    args=parse_args(argv)
     clear_run_fetch_cache()
-    print(format_summary(collect_results(HistoryStore(production=True))))
+    lookback=args.backfill_days if args.backfill_days is not None else ROUTINE_LOOKBACK_DAYS
+    print(format_summary(collect_results(HistoryStore(production=True),unresolved_lookback_days=lookback)))
 
 if __name__ == "__main__":
     main()

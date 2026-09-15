@@ -170,16 +170,33 @@ class HistoryStore:
         self.execute(f"INSERT INTO results (game_key,sport,matchup,event_start_utc,away_score,home_score,settled_at_utc,result_source,external_event_id,source_status,result_fetched_at_utc) VALUES ({','.join([self.p]*11)}) ON CONFLICT(game_key) DO UPDATE SET away_score=excluded.away_score,home_score=excluded.home_score,result_source=COALESCE(excluded.result_source,results.result_source),external_event_id=COALESCE(excluded.external_event_id,results.external_event_id),source_status=COALESCE(excluded.source_status,results.source_status),result_fetched_at_utc=excluded.result_fetched_at_utc",(game,sport,matchup,start,away_score,home_score,settled,result_source,external_event_id,source_status,fetched_at)); self.connection.commit()
     def snapshots(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM snapshots ORDER BY observed_at_utc"))
     def results(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM results"))
-    def unresolved_games(self, now=None) -> list[dict[str,Any]]:
-        boundary=normalize_utc(now or datetime.now(timezone.utc))
-        sql=self._game_identity_query("s.game_key,s.sport,s.matchup,s.event_start_utc", "LEFT JOIN results r ON r.game_key=s.game_key", "r.game_key IS NULL")
-        # Normalize on read as well as write: old TEXT rows may use +00:00 rather than Z.
-        return [row for row in self.rows(self.execute(sql)) if normalize_utc(row["event_start_utc"]) < boundary]
-    def recently_settled_games(self, now=None, correction_hours=48) -> list[dict[str,Any]]:
-        cutoff=normalize_utc((now or datetime.now(timezone.utc))-timedelta(hours=correction_hours))
+    def unresolved_games(self, now=None, sports: Optional[Iterable[str]]=None, lookback_days: Optional[int]=None) -> list[dict[str,Any]]:
+        boundary=normalize_utc(now or datetime.now(timezone.utc)); values=[]; conditions=["r.game_key IS NULL",f"{self._timestamp_sql('s.event_start_utc')} < {self._timestamp_sql(self.p)}"]
+        values.append(boundary)
+        if lookback_days is not None:
+            if lookback_days < 0: raise ValueError("lookback_days must be non-negative")
+            values.append(normalize_utc((now or datetime.now(timezone.utc))-timedelta(days=lookback_days)))
+            conditions.append(f"{self._timestamp_sql('s.event_start_utc')} >= {self._timestamp_sql(self.p)}")
+        if sports is not None:
+            sports=tuple(sports)
+            if not sports: return []
+            conditions.append(f"s.sport IN ({','.join([self.p]*len(sports))})"); values.extend(sports)
+        sql=self._game_identity_query("s.game_key,s.sport,s.matchup,s.event_start_utc", "LEFT JOIN results r ON r.game_key=s.game_key", " AND ".join(conditions))
+        return self.rows(self.execute(sql,values))
+    def recently_settled_games(self, now=None, correction_hours=48, sports: Optional[Iterable[str]]=None) -> list[dict[str,Any]]:
+        reference=now or datetime.now(timezone.utc); cutoff=normalize_utc(reference-timedelta(hours=correction_hours)); values=[cutoff]
+        conditions=[f"{self._timestamp_sql('r.settled_at_utc')} >= {self._timestamp_sql(self.p)}"]
+        if sports is not None:
+            sports=tuple(sports)
+            if not sports: return []
+            conditions.append(f"r.sport IN ({','.join([self.p]*len(sports))})"); values.extend(sports)
         # The identity CTE is one row per game, so PostgreSQL never has to group r.*.
-        sql=self._game_identity_query("r.*", "JOIN results r ON r.game_key=i.game_key", "1=1", identity_first=True)
-        return [row for row in self.rows(self.execute(sql)) if normalize_utc(row["settled_at_utc"]) >= cutoff]
+        sql=self._game_identity_query("r.*", "JOIN results r ON r.game_key=i.game_key", " AND ".join(conditions), identity_first=True)
+        return self.rows(self.execute(sql,values))
+
+    def _timestamp_sql(self, expression: str) -> str:
+        """Portable UTC TEXT comparison, including existing Z/+00:00 records."""
+        return f"({expression})::timestamptz" if self.is_postgres else f"datetime({expression})"
 
     def _game_identity_query(self, columns: str, join: str, where: str, identity_first: bool = False) -> str:
         """Return a portable query with ambiguity-safe stored away/home identities."""

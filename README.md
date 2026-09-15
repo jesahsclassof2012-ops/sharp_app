@@ -46,3 +46,11 @@ Each game keeps one result row. Rechecks preserve the original
 timestamp. The captured entry snapshot line determines grading, while a later
 valid pregame closing snapshot determines CLV. Final scores do not determine
 CLV.
+
+Automated settlement supports **NFL and NCAAF only**. The hourly workflow
+checks unresolved games from the prior 14 days and separately rechecks settled
+results for corrected finals during the following 48 hours. Older unresolved
+games remain stored and can be recovered with a manual, safety-equivalent
+backfill, for example: `python result_collector.py --backfill-days 120`.
+Backfills retain final-only settlement, deterministic team matching, ambiguity
+rejection, provider failure propagation, and duplicate-event protection.
