@@ -44,6 +44,78 @@ DISPLAY_COLUMNS = [
 ]
 
 
+def display_value(value: Any) -> str:
+    """Keep missing values concise without mutating the source data."""
+    return "N/A" if value is None or pd.isna(value) else str(value)
+
+
+def format_percent(value: Any, decimals: int = 0) -> str:
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"{float(value):.{decimals}f}%"
+
+
+def format_gap(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"{float(value):+g}"
+
+
+def format_price(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "N/A"
+    price = int(value)
+    return f"+{price}" if price > 0 else str(price)
+
+
+def format_line(value: Any) -> str:
+    return display_value(value)
+
+
+def format_card_start(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "Start time N/A"
+    stamp = pd.Timestamp(value)
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize(PACIFIC)
+    else:
+        stamp = stamp.tz_convert(PACIFIC)
+    return f"{stamp.strftime('%b')} {stamp.day}, {stamp.strftime('%I').lstrip('0')}:{stamp.strftime('%M %p')} PT"
+
+
+def active_filter_summary(sport: str, market: str, hours: int) -> str:
+    return f"{sport} · {market} markets · Next {hours}h"
+
+
+def card_filter_signature(sport: str, market: str, min_gap: float, max_tickets: float, hours: int, require_price: bool) -> tuple[Any, ...]:
+    return sport, market, min_gap, max_tickets, hours, require_price
+
+
+def render_signal_cards(data: pd.DataFrame) -> None:
+    """Render bounded, touch-friendly native cards without dropping rows."""
+    shown = st.session_state.get("sharp_cards_shown", 20)
+    shown = min(shown, len(data))
+    for _, row in data.iloc[:shown].iterrows():
+        with st.container(border=True):
+            st.markdown(f"**{display_value(row['Matchup'])}**")
+            st.caption(f"{format_card_start(row['Start time'])} · {display_value(row['Market'])} · Selection: {display_value(row['Selection'])}")
+            with st.container(horizontal=True, wrap=True, gap="small"):
+                st.metric("Money", format_percent(row["Money %"]), width="content")
+                st.metric("Bets", format_percent(row["Bets %"]), width="content")
+                st.metric("Gap", format_gap(row["Money minus Bets gap"]), width="content")
+            with st.container(horizontal=True, wrap=True, gap="small"):
+                st.metric("Best line", format_line(row["Best line"]), width="content")
+                st.metric("Price", format_price(row["Best price"]), width="content")
+                st.metric("BE", format_percent(row["Break-even %"], 1), width="content")
+            st.caption(f"Line vs split: {display_value(row['Line vs split'])} · Data quality: {display_value(row['Data quality'])} · Session: {display_value(row['Session movement'])}")
+    if shown < len(data):
+        if st.button(f"Show more ({len(data) - shown} remaining)", use_container_width=True, key="show_more_cards"):
+            st.session_state["sharp_cards_shown"] = min(len(data), shown + 20)
+            st.rerun()
+    elif len(data) > 20:
+        st.caption(f"Showing all {len(data)} signals.")
+
+
 def extract_percentage(element: Optional[Tag]) -> Optional[float]:
     """Read a displayed percentage, falling back to the chart-bar width."""
     if not element:
@@ -272,55 +344,60 @@ def add_session_movement(data: pd.DataFrame) -> pd.DataFrame:
 def render_history() -> None:
     """Persistent-history view; conclusions stay descriptive at small samples."""
     st.divider()
-    st.header("History / Performance")
-    if not os.getenv("DATABASE_URL"):
-        st.warning("History unavailable: configure DATABASE_URL.")
-        return
-    try:
-        store = HistoryStore(production=True)
-    except Exception as exc:
-        st.warning(f"History unavailable: database connection failed ({exc}).")
-        return
-    snapshots = store.snapshots()
-    rows = store.analytics_rows()
-    metrics = performance(rows)
-    st.caption("Persistent database history. Small samples are not evidence of a profitable strategy.")
-    columns = st.columns(5)
-    for column, label, value in zip(columns, ("Stored observations", "Unique settled baseline signals", "Wins", "Losses", "Pushes"), (len(snapshots), metrics["settled"], metrics["wins"], metrics["losses"], metrics["pushes"])):
-        column.metric(label, value)
-    columns = st.columns(5)
-    for column, label, value in zip(columns, ("Win rate", "Units", "ROI", "Average CLV", "Positive CLV rate"), (metrics["win_rate"], metrics["units"], metrics["roi"], metrics["average_clv"], metrics["positive_clv_rate"])):
-        if label in {"Win rate", "ROI"}:
-            column.metric(label, "N/A" if value is None else f"{value:.1%}")
-        else:
-            column.metric(label, "N/A" if value is None else f"{value:.3f}" if isinstance(value, float) else value)
-    if metrics["settled"] < 30:
-        st.info("Insufficient sample size: fewer than 30 settled observations.")
-    for title, field in (("Performance by Money minus Bets gap", "money_minus_bets_gap"), ("Performance by sport", "sport"), ("Performance by market", "market"), ("Performance by ticket share", "bets_pct"), ("Performance by line vs split", "line_vs_split"), ("Performance by price range", "best_price")):
-        summary = bucket_performance(rows, field)
-        st.subheader(title)
-        st.dataframe(pd.DataFrame.from_dict(summary, orient="index"), use_container_width=True)
-    for label, records in (("Export snapshots CSV", snapshots), ("Export settled results CSV", rows)):
-        output = io.StringIO()
-        if records:
-            writer = csv.DictWriter(output, fieldnames=sorted({key for row in records for key in row}))
-            writer.writeheader()
-            writer.writerows(records)
-        st.download_button(label, output.getvalue(), file_name=label.lower().replace(" ", "_") + ".csv", mime="text/csv")
+    with st.expander("History / Performance", expanded=False):
+        if not os.getenv("DATABASE_URL"):
+            st.warning("History unavailable: configure DATABASE_URL.")
+            return
+        try:
+            store = HistoryStore(production=True)
+        except Exception as exc:
+            st.warning(f"History unavailable: database connection failed ({exc}).")
+            return
+        snapshots = store.snapshots()
+        rows = store.analytics_rows()
+        metrics = performance(rows)
+        st.caption("Persistent database history. Small samples are not evidence of a profitable strategy.")
+        metric_items = (("Stored observations", len(snapshots)), ("Unique settled baseline signals", metrics["settled"]), ("Wins", metrics["wins"]), ("Losses", metrics["losses"]), ("Pushes", metrics["pushes"]), ("Win rate", metrics["win_rate"]), ("Units", metrics["units"]), ("ROI", metrics["roi"]), ("Average CLV", metrics["average_clv"]), ("Positive CLV rate", metrics["positive_clv_rate"]))
+        with st.container(horizontal=True, wrap=True, gap="small"):
+            for label, value in metric_items:
+                if label in {"Win rate", "ROI", "Positive CLV rate"}:
+                    st.metric(label, "N/A" if value is None else f"{value:.1%}", width="content")
+                else:
+                    st.metric(label, "N/A" if value is None else f"{value:.3f}" if isinstance(value, float) else value, width="content")
+        if not rows:
+            st.info("No settled history is available yet.")
+        elif metrics["settled"] < 30:
+            st.info("Insufficient sample size: fewer than 30 settled observations.")
+        breakdowns = {"Money minus Bets gap": "money_minus_bets_gap", "Sport": "sport", "Market": "market", "Ticket share": "bets_pct", "Line vs split": "line_vs_split", "Price range": "best_price"}
+        selected = st.selectbox("Breakdown", list(breakdowns), key="history_breakdown")
+        summary = bucket_performance(rows, breakdowns[selected])
+        if summary:
+            st.dataframe(pd.DataFrame.from_dict(summary, orient="index"), use_container_width=True)
+        with st.expander("Exports", expanded=False):
+            for label, records in (("Export snapshots CSV", snapshots), ("Export settled results CSV", rows)):
+                output = io.StringIO()
+                if records:
+                    writer = csv.DictWriter(output, fieldnames=sorted({key for row in records for key in row}))
+                    writer.writeheader()
+                    writer.writerows(records)
+                st.download_button(label, output.getvalue(), file_name=label.lower().replace(" ", "_") + ".csv", mime="text/csv", use_container_width=True)
 
 
 def main() -> None:
-    st.set_page_config(page_title="Sharp Signal V2", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="Sharp Signal V2", layout="wide", initial_sidebar_state="auto")
     st.title("Sharp Signal V2")
-    st.caption("Transparent split screening. Signals are observations, not betting advice.")
-    sport = st.sidebar.selectbox("Sport", SPORTS)
-    min_gap = st.sidebar.slider("Minimum Money minus Bets gap", -50.0, 50.0, 0.0, 0.5)
-    max_tickets = st.sidebar.slider("Maximum ticket share", 0.0, 100.0, 100.0, 1.0)
-    market = st.sidebar.selectbox("Market", ["All", "Moneyline", "Spread", "Total"])
-    hours = st.sidebar.slider("Time window (hours)", 1, 168, 24)
-    require_price = st.sidebar.checkbox("Require current best price", value=True)
-    if st.sidebar.button("Refresh"):
-        fetch_data.clear()
+    st.caption("Transparent split screening.")
+    st.caption("Signals are observations, not betting advice.")
+    with st.expander("Filters", expanded=False):
+        sport = st.selectbox("Sport", SPORTS, key="filter_sport")
+        min_gap = st.slider("Minimum Money minus Bets gap", -50.0, 50.0, 0.0, 0.5, key="filter_gap")
+        max_tickets = st.slider("Maximum ticket share", 0.0, 100.0, 100.0, 1.0, key="filter_tickets")
+        market = st.selectbox("Market", ["All", "Moneyline", "Spread", "Total"], key="filter_market")
+        hours = st.slider("Time window (hours)", 1, 168, 24, key="filter_hours")
+        require_price = st.checkbox("Require current best price", value=True, key="filter_price")
+        if st.button("Refresh data", use_container_width=True, key="refresh_data"):
+            fetch_data.clear()
+    st.caption(active_filter_summary(sport, market, hours))
     try:
         data = fetch_data(sport)
     except requests.RequestException as exc:
@@ -328,6 +405,7 @@ def main() -> None:
         return
     if data.empty:
         st.info("No consensus cards were available for this sport.")
+        render_history()
         return
     now = datetime.now(PACIFIC)
     data = data[(data["Money minus Bets gap"].fillna(-999) >= min_gap) & (data["Bets %"].fillna(101) <= max_tickets)]
@@ -337,11 +415,25 @@ def main() -> None:
     if require_price:
         data = data[data["Best price"].notna()]
     data = add_session_movement(data).sort_values(["Start time", "Money minus Bets gap"], ascending=[True, False])
-    st.caption("Session movement compares this browser session only; it is not persistent historical backtesting.")
-    st.dataframe(data[DISPLAY_COLUMNS + ["Session movement"]], use_container_width=True, hide_index=True, column_config={
-        "Start time": st.column_config.DatetimeColumn(format="MMM D, h:mm a"),
-        "Last refresh time": st.column_config.DatetimeColumn(format="MMM D, h:mm:ss a"),
-    })
+    signature = card_filter_signature(sport, market, min_gap, max_tickets, hours, require_price)
+    if st.session_state.get("sharp_cards_filter_signature") != signature:
+        st.session_state["sharp_cards_filter_signature"] = signature
+        st.session_state["sharp_cards_shown"] = 20
+    if data.empty:
+        st.info("No matching signals for these filters. Expand Filters to adjust the screen.")
+        render_history()
+        return
+    refresh_time = data["Last refresh time"].max()
+    st.caption(f"Last data refresh: {format_card_start(refresh_time).replace('Start time ', '')}")
+    view = st.radio("Results view", ["Cards", "Table"], horizontal=True, key="results_view")
+    if view == "Cards":
+        render_signal_cards(data)
+    else:
+        st.caption("Session movement compares this browser session only; it is not persistent historical backtesting.")
+        st.dataframe(data[DISPLAY_COLUMNS + ["Session movement"]], use_container_width=True, hide_index=True, column_config={
+            "Start time": st.column_config.DatetimeColumn(format="MMM D, h:mm a"),
+            "Last refresh time": st.column_config.DatetimeColumn(format="MMM D, h:mm:ss a"),
+        })
     render_history()
 
 
