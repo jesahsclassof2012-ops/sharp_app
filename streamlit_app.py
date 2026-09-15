@@ -83,12 +83,52 @@ def format_card_start(value: Any) -> str:
     return f"{stamp.strftime('%b')} {stamp.day}, {stamp.strftime('%I').lstrip('0')}:{stamp.strftime('%M %p')} PT"
 
 
-def active_filter_summary(sport: str, market: str, hours: int) -> str:
-    return f"{sport} · {market} markets · Next {hours}h"
+def active_filter_summary(sport: str, market: str, hours: int, max_money: float = 100.0, max_tickets: float = 100.0) -> str:
+    """Summarize only live-board filters that actually narrow the board."""
+    parts = [f"{sport} · {market} markets · Next {hours}h"]
+    if max_money < 100:
+        parts.append(f"Money ≤ {max_money:g}%")
+    if max_tickets < 100:
+        parts.append(f"Tickets ≤ {max_tickets:g}%")
+    return " · ".join(parts)
 
 
-def card_filter_signature(sport: str, market: str, min_gap: float, max_tickets: float, hours: int, require_price: bool) -> tuple[Any, ...]:
-    return sport, market, min_gap, max_tickets, hours, require_price
+def card_filter_signature(sport: str, market: str, min_gap: float, max_tickets: float, max_money: float, hours: int, require_price: bool) -> tuple[Any, ...]:
+    return sport, market, min_gap, max_tickets, max_money, hours, require_price
+
+
+def apply_share_filters(data: pd.DataFrame, max_tickets: float, max_money: float) -> pd.DataFrame:
+    """Screen shares without changing the source percentages or their meaning."""
+    return data[(data["Bets %"].fillna(101) <= max_tickets) & (data["Money %"].fillna(101) <= max_money)]
+
+
+def history_sports(snapshots: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[str]:
+    """Return the persistent-history sport values, rather than a fixed league list."""
+    return sorted({str(record["sport"]) for record in [*snapshots, *rows] if record.get("sport")})
+
+
+def filter_history_by_sport(snapshots: list[dict[str, Any]], rows: list[dict[str, Any]], sport: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Scope all visible history records to one selected sport when requested."""
+    if sport == "All sports":
+        return snapshots, rows
+    return ([record for record in snapshots if record.get("sport") == sport],
+            [record for record in rows if record.get("sport") == sport])
+
+
+def history_scope_metrics(snapshots: list[dict[str, Any]], rows: list[dict[str, Any]], sport: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Keep history counts and performance calculations on the same sport scope."""
+    filtered_snapshots, filtered_rows = filter_history_by_sport(snapshots, rows, sport)
+    return filtered_snapshots, filtered_rows, performance(filtered_rows)
+
+
+def history_export_filename(prefix: str, sport: str) -> str:
+    suffix = "all_sports" if sport == "All sports" else sport.lower().replace(" ", "_")
+    return f"{prefix}_{suffix}.csv"
+
+
+def insufficient_sample_message(sport: str) -> str:
+    qualifier = "" if sport == "All sports" else f" {sport}"
+    return f"Insufficient{qualifier} sample size: fewer than 30 settled observations."
 
 
 def render_signal_cards(data: pd.DataFrame) -> None:
@@ -355,32 +395,38 @@ def render_history() -> None:
             return
         snapshots = store.snapshots()
         rows = store.analytics_rows()
-        metrics = performance(rows)
+        sports = history_sports(snapshots, rows)
+        options = ["All sports", *sports]
+        current = st.session_state.get("history_sport", "All sports")
+        if current not in options:
+            st.session_state["history_sport"] = "All sports"
+        selected_sport = st.selectbox("History sport", options, key="history_sport")
+        filtered_snapshots, filtered_rows, metrics = history_scope_metrics(snapshots, rows, selected_sport)
         st.caption("Persistent database history. Small samples are not evidence of a profitable strategy.")
-        metric_items = (("Stored observations", len(snapshots)), ("Unique settled baseline signals", metrics["settled"]), ("Wins", metrics["wins"]), ("Losses", metrics["losses"]), ("Pushes", metrics["pushes"]), ("Win rate", metrics["win_rate"]), ("Units", metrics["units"]), ("ROI", metrics["roi"]), ("Average CLV", metrics["average_clv"]), ("Positive CLV rate", metrics["positive_clv_rate"]))
+        metric_items = (("Stored observations", len(filtered_snapshots)), ("Unique settled baseline signals", metrics["settled"]), ("Wins", metrics["wins"]), ("Losses", metrics["losses"]), ("Pushes", metrics["pushes"]), ("Win rate", metrics["win_rate"]), ("Units", metrics["units"]), ("ROI", metrics["roi"]), ("Average CLV", metrics["average_clv"]), ("Positive CLV rate", metrics["positive_clv_rate"]))
         with st.container(horizontal=True, wrap=True, gap="small"):
             for label, value in metric_items:
                 if label in {"Win rate", "ROI", "Positive CLV rate"}:
                     st.metric(label, "N/A" if value is None else f"{value:.1%}", width="content")
                 else:
                     st.metric(label, "N/A" if value is None else f"{value:.3f}" if isinstance(value, float) else value, width="content")
-        if not rows:
+        if not filtered_rows:
             st.info("No settled history is available yet.")
         elif metrics["settled"] < 30:
-            st.info("Insufficient sample size: fewer than 30 settled observations.")
+            st.info(insufficient_sample_message(selected_sport))
         breakdowns = {"Money minus Bets gap": "money_minus_bets_gap", "Sport": "sport", "Market": "market", "Ticket share": "bets_pct", "Line vs split": "line_vs_split", "Price range": "best_price"}
         selected = st.selectbox("Breakdown", list(breakdowns), key="history_breakdown")
-        summary = bucket_performance(rows, breakdowns[selected])
+        summary = bucket_performance(filtered_rows, breakdowns[selected])
         if summary:
             st.dataframe(pd.DataFrame.from_dict(summary, orient="index"), use_container_width=True)
         with st.expander("Exports", expanded=False):
-            for label, records in (("Export snapshots CSV", snapshots), ("Export settled results CSV", rows)):
+            for label, records, prefix in (("Export snapshots CSV", filtered_snapshots, "snapshots"), ("Export settled results CSV", filtered_rows, "settled_results")):
                 output = io.StringIO()
                 if records:
                     writer = csv.DictWriter(output, fieldnames=sorted({key for row in records for key in row}))
                     writer.writeheader()
                     writer.writerows(records)
-                st.download_button(label, output.getvalue(), file_name=label.lower().replace(" ", "_") + ".csv", mime="text/csv", use_container_width=True)
+                st.download_button(label, output.getvalue(), file_name=history_export_filename(prefix, selected_sport), mime="text/csv", use_container_width=True)
 
 
 def main() -> None:
@@ -392,12 +438,13 @@ def main() -> None:
         sport = st.selectbox("Sport", SPORTS, key="filter_sport")
         min_gap = st.slider("Minimum Money minus Bets gap", -50.0, 50.0, 0.0, 0.5, key="filter_gap")
         max_tickets = st.slider("Maximum ticket share", 0.0, 100.0, 100.0, 1.0, key="filter_tickets")
+        max_money = st.slider("Maximum money share", 0.0, 100.0, 100.0, 1.0, key="filter_money")
         market = st.selectbox("Market", ["All", "Moneyline", "Spread", "Total"], key="filter_market")
         hours = st.slider("Time window (hours)", 1, 168, 24, key="filter_hours")
         require_price = st.checkbox("Require current best price", value=True, key="filter_price")
         if st.button("Refresh data", use_container_width=True, key="refresh_data"):
             fetch_data.clear()
-    st.caption(active_filter_summary(sport, market, hours))
+    st.caption(active_filter_summary(sport, market, hours, max_money, max_tickets))
     try:
         data = fetch_data(sport)
     except requests.RequestException as exc:
@@ -408,14 +455,15 @@ def main() -> None:
         render_history()
         return
     now = datetime.now(PACIFIC)
-    data = data[(data["Money minus Bets gap"].fillna(-999) >= min_gap) & (data["Bets %"].fillna(101) <= max_tickets)]
+    data = data[data["Money minus Bets gap"].fillna(-999) >= min_gap]
+    data = apply_share_filters(data, max_tickets, max_money)
     if market != "All":
         data = data[data["Market"] == market]
     data = data[data["Start time"].isna() | ((data["Start time"] >= now) & (data["Start time"] <= now + timedelta(hours=hours)))]
     if require_price:
         data = data[data["Best price"].notna()]
     data = add_session_movement(data).sort_values(["Start time", "Money minus Bets gap"], ascending=[True, False])
-    signature = card_filter_signature(sport, market, min_gap, max_tickets, hours, require_price)
+    signature = card_filter_signature(sport, market, min_gap, max_tickets, max_money, hours, require_price)
     if st.session_state.get("sharp_cards_filter_signature") != signature:
         st.session_state["sharp_cards_filter_signature"] = signature
         st.session_state["sharp_cards_shown"] = 20

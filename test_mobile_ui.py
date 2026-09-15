@@ -1,3 +1,5 @@
+import pandas as pd
+
 import streamlit_app as app
 
 
@@ -32,7 +34,17 @@ def test_card_time_is_converted_to_pacific_before_pt_labeling():
 
 
 def test_filter_signature_and_summary_are_deterministic():
-    first = app.card_filter_signature("NFL", "All", 0.0, 100.0, 24, True)
-    assert first == app.card_filter_signature("NFL", "All", 0.0, 100.0, 24, True)
-    assert first != app.card_filter_signature("NCAAF", "All", 0.0, 100.0, 24, True)
+    first = app.card_filter_signature("NFL", "All", 0.0, 100.0, 100.0, 24, True)
+    assert first == app.card_filter_signature("NFL", "All", 0.0, 100.0, 100.0, 24, True)
+    assert first != app.card_filter_signature("NFL", "All", 0.0, 100.0, 80.0, 24, True)
+    assert first != app.card_filter_signature("NCAAF", "All", 0.0, 100.0, 100.0, 24, True)
     assert app.active_filter_summary("NFL", "All", 24) == "NFL · All markets · Next 24h"
+    assert app.active_filter_summary("NFL", "All", 24, 80.0) == "NFL · All markets · Next 24h · Money ≤ 80%"
+    assert app.active_filter_summary("NFL", "Spread", 48, 85.0, 70.0) == "NFL · Spread markets · Next 48h · Money ≤ 85% · Tickets ≤ 70%"
+
+
+def test_maximum_money_share_filter_is_inclusive_and_missing_safe():
+    data = pd.DataFrame({"Bets %": [50.0, 50.0, 50.0, 50.0], "Money %": [79.0, 80.0, 81.0, None]})
+    assert list(app.apply_share_filters(data, 100.0, 80.0).index) == [0, 1]
+    assert list(app.apply_share_filters(data, 100.0, 100.0).index) == [0, 1, 2]
+    assert list(app.apply_share_filters(data, 49.0, 100.0).index) == []
