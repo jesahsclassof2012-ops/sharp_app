@@ -1,4 +1,4 @@
-"""Read-only ESPN Core discovery, parsing, and deterministic game matching."""
+"""Read-only ESPN scoreboard discovery, parsing, and deterministic matching."""
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import re
@@ -6,10 +6,11 @@ from typing import Any, Iterable
 import requests
 from history_store import normalize_utc
 
-CORE_BASE = "https://sports.core.api.espn.com/v2/sports/football/leagues"
+SCOREBOARD_BASE = "https://site.web.api.espn.com/apis/site/v2/sports/football"
 LEAGUES = {"NFL": "nfl", "NCAAF": "college-football"}
 TOLERANCE_SECONDS = 12 * 60 * 60
 HTTP_HEADERS = {"User-Agent": "SharpSignal/2.0"}
+_RUN_FETCH_CACHE: dict[str, dict[str, Any]] = {}
 # Sport-scoped whole-team aliases only. Never map generic "miami".
 ALIASES = {
     "NFL": {"arizonacardinals":"ari","atlantafalcons":"atl","baltimoreravens":"bal","buffalobills":"buf","carolinapanthers":"car","chicagobears":"chi","cincinnatibengals":"cin","clevelandbrowns":"cle","dallascowboys":"dal","denverbroncos":"den","detroitlions":"det","greenbaypackers":"gb","houstontexans":"hou","indianapoliscolts":"ind","jacksonvillejaguars":"jax","kansascitychiefs":"kc","lasvegasraiders":"lv","losangeleschargers":"lac","losangelesrams":"lar","miamidolphins":"mia","minnesotavikings":"min","newenglandpatriots":"ne","neworleanssaints":"no","newyorkgiants":"nyg","newyorkjets":"nyj","philadelphiaeagles":"phi","pittsburghsteelers":"pit","sanfrancisco49ers":"sf","seattleseahawks":"sea","tampabaybuccaneers":"tb","tennesseetitans":"ten","washingtoncommanders":"was"},
@@ -23,9 +24,14 @@ def normalize_team(sport: str, value: Any) -> str:
 def _ref(value: Any) -> str | None: return value.get("$ref") if isinstance(value, dict) else None
 
 def fetch_json(url: str) -> dict[str, Any]:
-    response = requests.get(url, timeout=30, headers=HTTP_HEADERS); response.raise_for_status(); payload = response.json()
+    key=url.replace("http:","https:",1)
+    if key in _RUN_FETCH_CACHE: return _RUN_FETCH_CACHE[key]
+    response = requests.get(key, timeout=30, headers=HTTP_HEADERS); response.raise_for_status(); payload = response.json()
     if not isinstance(payload, dict): raise ValueError("ESPN payload is not an object")
+    _RUN_FETCH_CACHE[key]=payload
     return payload
+
+def clear_run_fetch_cache() -> None: _RUN_FETCH_CACHE.clear()
 
 def _resolved(value: Any) -> dict[str, Any]:
     url = _ref(value)
@@ -85,10 +91,10 @@ def fetch_events_for_date(sport: str, date: Any) -> list[dict[str,Any]]:
     if isinstance(date,datetime): date=date.astimezone(timezone.utc).strftime("%Y%m%d")
     elif hasattr(date,"strftime"): date=date.strftime("%Y%m%d")
     elif not re.fullmatch(r"\d{8}",str(date)): raise ValueError("date must be YYYYMMDD")
-    listing=fetch_json(f"{CORE_BASE}/{LEAGUES[sport]}/events?dates={date}&limit=500"); items=listing.get("items")
-    if not isinstance(items,list): raise ValueError("ESPN event listing is missing items")
-    if any(not _ref(item) for item in items): raise ValueError("ESPN event listing has malformed item")
-    return [parse_event(_resolved(item),sport) for item in items]
+    listing=fetch_json(f"{SCOREBOARD_BASE}/{LEAGUES[sport]}/scoreboard?dates={date}&limit=500"); events=listing.get("events")
+    if not isinstance(events,list): raise ValueError("ESPN scoreboard is missing events")
+    if any(not isinstance(event,dict) for event in events): raise ValueError("ESPN scoreboard has malformed event")
+    return [parse_event(event,sport) for event in events]
 
 def provider_dates_for_games(games: Iterable[dict[str,Any]]) -> list[str]:
     dates=set()
@@ -96,6 +102,20 @@ def provider_dates_for_games(games: Iterable[dict[str,Any]]) -> list[str]:
         start=datetime.fromisoformat(normalize_utc(game["event_start_utc"]).replace("Z","+00:00")); dates.update((start+timedelta(days=offset)).strftime("%Y%m%d") for offset in (-1,0,1))
     return sorted(dates)
 def _kickoff(value: Any) -> datetime: return datetime.fromisoformat(normalize_utc(value).replace("Z","+00:00"))
+
+def _event_signature(event: dict[str,Any]) -> tuple[Any,...]:
+    return (event["event_start_utc"],event["status"],event.get("away_score"),event.get("home_score"),
+            tuple(sorted(provider_team_keys(event["sport"],event["away"]))),tuple(sorted(provider_team_keys(event["sport"],event["home"]))))
+
+def deduplicate_provider_events(events: Iterable[dict[str,Any]]) -> list[dict[str,Any]]:
+    """Collapse repeat date-window copies, rejecting materially conflicting ones."""
+    unique: dict[tuple[str,str],dict[str,Any]]={}
+    for event in events:
+        key=(event["sport"],str(event["external_event_id"]))
+        if key in unique and _event_signature(unique[key]) != _event_signature(event):
+            raise ValueError(f"conflicting duplicate ESPN event: {key[0]} {key[1]}")
+        unique[key]=event
+    return list(unique.values())
 
 def match_stored_game(game: dict[str,Any], provider_events: Iterable[dict[str,Any]]) -> dict[str,Any]:
     if not game.get("away_team") or not game.get("home_team"): return {"status":"incomplete_identity","event":None}
@@ -111,6 +131,35 @@ def match_stored_game(game: dict[str,Any], provider_events: Iterable[dict[str,An
         except (KeyError,TypeError,ValueError): continue
     return {"status":"matched","event":candidates[0]} if len(candidates)==1 else {"status":"ambiguous" if len(candidates)>1 else "unmatched","event":None}
 
+def collect_results(store: HistoryStore, fetcher=fetch_events_for_date, now: datetime | None = None) -> dict[str,int]:
+    """Perform one fail-closed settlement run; provider errors intentionally escape."""
+    unresolved=store.unresolved_games(now); recent=store.recently_settled_games(now,correction_hours=48)
+    planned=unresolved+recent; raw_events=[]
+    for sport in LEAGUES:
+        sport_games=[game for game in planned if game.get("sport")==sport]
+        for date in provider_dates_for_games(sport_games): raw_events.extend(fetcher(sport,date))
+    events=deduplicate_provider_events(raw_events)
+    summary={"unresolved_checked":len(unresolved),"recent_rechecked":len(recent),"provider_events_fetched":len(events),"matched_finals":0,"new_results_recorded":0,"corrected_results_updated":0,"not_final_skipped":0,"unmatched_skipped":0,"ambiguous_skipped":0,"incomplete_identity_skipped":0}
+    for game, is_recent in [(game,False) for game in unresolved]+[(game,True) for game in recent]:
+        match=match_stored_game(game,events); state=match["status"]
+        if state!="matched":
+            summary[f"{state}_skipped"]+=1
+            continue
+        event=match["event"]
+        if event["status"]!="final":
+            summary["not_final_skipped"]+=1
+            continue
+        summary["matched_finals"]+=1
+        changed=is_recent and (game["away_score"]!=event["away_score"] or game["home_score"]!=event["home_score"])
+        store.record_game_result(game["sport"],game["matchup"],game["event_start_utc"],event["away_score"],event["home_score"],result_source="espn_core",external_event_id=event["external_event_id"],source_status=event["source_status"])
+        if is_recent:
+            if changed: summary["corrected_results_updated"]+=1
+        else: summary["new_results_recorded"]+=1
+    return summary
+
+def format_summary(summary: dict[str,int]) -> str:
+    return "\n".join((f"Checked {summary['unresolved_checked']} unresolved games.",f"Rechecked {summary['recent_rechecked']} recent results.",f"Fetched {summary['provider_events_fetched']} ESPN events.",f"Matched {summary['matched_finals']} final games.",f"Recorded {summary['new_results_recorded']} new results.",f"Updated {summary['corrected_results_updated']} corrected results.",f"Skipped {summary['not_final_skipped']} not final.",f"Skipped {summary['unmatched_skipped']} unmatched.",f"Skipped {summary['ambiguous_skipped']} ambiguous.",f"Skipped {summary['incomplete_identity_skipped']} incomplete identity."))
+
 def main() -> None:
-    # Step 2 intentionally performs no production writes or discovery orchestration.
-    print("Result ingestion is not enabled in Step 2.")
+    clear_run_fetch_cache()
+    print(format_summary(collect_results(HistoryStore(production=True))))

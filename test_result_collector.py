@@ -1,27 +1,28 @@
 import pytest
 import result_collector as rc
+from history_store import HistoryStore
 
 def team(abbr, display=None): return {"id":abbr,"abbreviation":abbr,"displayName":display or abbr,"shortDisplayName":display or abbr}
 def event(event_id="1", status=None, away="DEN", home="KC", date="2026-09-01T20:00:00Z", scores=("20","17")):
     return {"id":event_id,"date":date,"competitions":[{"status":status or {"type":{"name":"STATUS_FINAL","state":"post","completed":True,"description":"Final"}},"competitors":[{"homeAway":"away","team":team(away),"score":{"value":scores[0]}},{"homeAway":"home","team":team(home),"score":{"value":scores[1]}}]}]}
 def parsed(**changes): return rc.parse_event(event(**changes),"NFL")
 def game(**changes):
-    data={"sport":"NFL","away_team":"DEN","home_team":"KC","event_start_utc":"2026-09-01T20:00:00Z"}; data.update(changes); return data
+    data={"sport":"NFL","matchup":"DEN vs KC","away_team":"DEN","home_team":"KC","event_start_utc":"2026-09-01T20:00:00Z"}; data.update(changes); return data
 
 def test_discovery_nfl_and_ncaaf_date_requests(monkeypatch):
     urls=[]; payload=event()
     def fake(url):
         urls.append(url)
-        return {"items":[{"$ref":"https://event"}]} if "/events?" in url else payload
+        return {"events":[payload]}
     monkeypatch.setattr(rc,"fetch_json",fake)
     assert rc.fetch_events_for_date("NFL","20260901")[0]["sport"]=="NFL"
     assert rc.fetch_events_for_date("NCAAF","20260901")[0]["sport"]=="NCAAF"
-    assert any("/nfl/events?dates=20260901" in x for x in urls) and any("/college-football/events?dates=20260901" in x for x in urls)
+    assert any("/nfl/scoreboard?dates=20260901" in x for x in urls) and any("/college-football/scoreboard?dates=20260901" in x for x in urls)
 
 def test_discovery_malformed_listing_fails_and_empty_slate_is_valid(monkeypatch):
-    monkeypatch.setattr(rc,"fetch_json",lambda url: {"items":[]}); assert rc.fetch_events_for_date("NFL","20260901")==[]
+    monkeypatch.setattr(rc,"fetch_json",lambda url: {"events":[]}); assert rc.fetch_events_for_date("NFL","20260901")==[]
     monkeypatch.setattr(rc,"fetch_json",lambda url: {}); 
-    with pytest.raises(ValueError,match="items"): rc.fetch_events_for_date("NFL","20260901")
+    with pytest.raises(ValueError,match="events"): rc.fetch_events_for_date("NFL","20260901")
 
 def test_http_failures_propagate(monkeypatch):
     class Response:
@@ -91,3 +92,74 @@ def test_date_planning_includes_adjacent_dates_and_deduplicates():
 def test_invalid_provider_kickoff_is_rejected():
     provider=parsed(); provider["event_start_utc"]="not-a-time"
     assert rc.match_stored_game(game(),[provider])["status"]=="unmatched"
+
+class FakeStore:
+    def __init__(self, unresolved=(), recent=()): self.unresolved=list(unresolved); self.recent=list(recent); self.writes=[]
+    def unresolved_games(self, now=None): return self.unresolved
+    def recently_settled_games(self, now=None, correction_hours=48): assert correction_hours==48; return self.recent
+    def record_game_result(self, *args, **kwargs): self.writes.append((args,kwargs))
+
+def run(store, events):
+    return rc.collect_results(store, lambda sport,date: events)
+
+def test_collector_writes_only_matched_final_unresolved_game():
+    store=FakeStore([game()]); summary=run(store,[parsed()])
+    assert len(store.writes)==1 and summary["new_results_recorded"]==1 and summary["matched_finals"]==1
+
+@pytest.mark.parametrize("status",["scheduled","in_progress","postponed","cancelled","suspended","unknown"])
+def test_collector_never_writes_nonfinal_matches(status):
+    store=FakeStore([game()]); provider=dict(parsed(),status=status,source_status=status,away_score=None,home_score=None)
+    summary=run(store,[provider]); assert store.writes==[] and summary["not_final_skipped"]==1
+
+def test_collector_skips_unmatched_ambiguous_and_incomplete_identity():
+    unmatched=FakeStore([game(away_team="BUF")]); assert run(unmatched,[parsed()])["unmatched_skipped"]==1 and not unmatched.writes
+    ambiguous=FakeStore([game()]); assert run(ambiguous,[parsed(),parsed(event_id="2")])["ambiguous_skipped"]==1 and not ambiguous.writes
+    incomplete=FakeStore([game(away_team=None)]); assert run(incomplete,[parsed()])["incomplete_identity_skipped"]==1 and not incomplete.writes
+
+def test_adjacent_date_duplicates_are_deduplicated_and_conflicts_fail():
+    one=parsed(); store=FakeStore([game()]); summary=run(store,[one,dict(one)])
+    assert summary["provider_events_fetched"]==1 and len(store.writes)==1
+    conflict=dict(one,home_score=99)
+    with pytest.raises(ValueError,match="conflicting duplicate"): rc.deduplicate_provider_events([one,conflict])
+
+def test_recent_correction_updates_only_changed_final_and_keeps_external_id():
+    recent_game=game(away_score=20,home_score=17,external_event_id="1")
+    store=FakeStore(recent=[recent_game]); summary=run(store,[parsed(scores=(21,17))])
+    assert len(store.writes)==1 and summary["corrected_results_updated"]==1
+    same=FakeStore(recent=[dict(recent_game,away_score=21)]); summary=run(same,[parsed(scores=(21,17))])
+    assert len(same.writes)==1 and summary["corrected_results_updated"]==0
+    switched=FakeStore(recent=[recent_game]); assert run(switched,[parsed(event_id="different")])["unmatched_skipped"]==1 and not switched.writes
+
+def test_collector_correction_keeps_one_row_and_original_settlement_time():
+    from datetime import datetime, timezone
+    store=HistoryStore("sqlite:///:memory:")
+    base={"observed_at_utc":"2026-08-31T00:00:00Z","sport":"NFL","matchup":"DEN vs KC","event_start_utc":"2026-09-01T20:00:00Z","market":"Spread","split_line":"+3 / -3","bets_pct":40,"money_pct":55,"money_minus_bets_gap":15,"best_line":"+3","best_price":-110,"break_even_pct":52.3,"data_quality":"OK","line_vs_split":"Same"}
+    store.insert_snapshots([dict(base,selection="DEN",selection_side="away"),dict(base,selection="KC",selection_side="home")])
+    store.record_game_result("NFL","DEN vs KC",base["event_start_utc"],20,17,settled_at_utc="2026-09-01T12:00:00Z",external_event_id="1")
+    before=store.results()[0]
+    summary=rc.collect_results(store,lambda sport,date:[parsed(scores=(21,17))],datetime(2026,9,2,tzinfo=timezone.utc))
+    after=store.results()[0]
+    assert len(store.results())==1 and summary["corrected_results_updated"]==1
+    assert after["away_score"]==21 and after["settled_at_utc"]==before["settled_at_utc"]
+
+def test_outside_correction_window_is_not_rechecked():
+    class WindowStore(FakeStore):
+        def recently_settled_games(self, now=None, correction_hours=48): return []
+    store=WindowStore(); summary=run(store,[parsed()]); assert summary["recent_rechecked"]==0 and store.writes==[]
+
+def test_provider_failures_and_malformed_events_fail_loudly():
+    with pytest.raises(RuntimeError,match="provider down"): rc.collect_results(FakeStore([game()]),lambda sport,date: (_ for _ in ()).throw(RuntimeError("provider down")))
+    with pytest.raises(KeyError): rc.collect_results(FakeStore([game()]),lambda sport,date: [{"broken":True}])
+
+def test_run_level_ref_cache_avoids_duplicate_http_calls(monkeypatch):
+    calls=[]; rc.clear_run_fetch_cache()
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"ok":True}
+    monkeypatch.setattr(rc.requests,"get",lambda url,**kwargs: calls.append(url) or Response())
+    assert rc.fetch_json("http://example.test/ref")==rc.fetch_json("https://example.test/ref")
+    assert calls==["https://example.test/ref"]
+
+def test_summary_has_no_credentials():
+    text=rc.format_summary({"unresolved_checked":1,"recent_rechecked":2,"provider_events_fetched":3,"matched_finals":4,"new_results_recorded":5,"corrected_results_updated":6,"not_final_skipped":7,"unmatched_skipped":8,"ambiguous_skipped":9,"incomplete_identity_skipped":10})
+    assert "DATABASE_URL" not in text and "password" not in text.lower()
