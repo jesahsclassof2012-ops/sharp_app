@@ -76,7 +76,19 @@ def format_card_start(value: Any) -> str:
     if value is None or pd.isna(value):
         return "Start time N/A"
     stamp = pd.Timestamp(value)
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize(PACIFIC)
+    else:
+        stamp = stamp.tz_convert(PACIFIC)
     return f"{stamp.strftime('%b')} {stamp.day}, {stamp.strftime('%I').lstrip('0')}:{stamp.strftime('%M %p')} PT"
+
+
+def active_filter_summary(sport: str, market: str, hours: int) -> str:
+    return f"{sport} · {market} markets · Next {hours}h"
+
+
+def card_filter_signature(sport: str, market: str, min_gap: float, max_tickets: float, hours: int, require_price: bool) -> tuple[Any, ...]:
+    return sport, market, min_gap, max_tickets, hours, require_price
 
 
 def render_signal_cards(data: pd.DataFrame) -> None:
@@ -87,15 +99,15 @@ def render_signal_cards(data: pd.DataFrame) -> None:
         with st.container(border=True):
             st.markdown(f"**{display_value(row['Matchup'])}**")
             st.caption(f"{format_card_start(row['Start time'])} · {display_value(row['Market'])} · Selection: {display_value(row['Selection'])}")
-            first, second, third = st.columns(3)
-            first.metric("Money", format_percent(row["Money %"]))
-            second.metric("Bets", format_percent(row["Bets %"]))
-            third.metric("Gap", format_gap(row["Money minus Bets gap"]))
-            first, second, third = st.columns(3)
-            first.metric("Best line", format_line(row["Best line"]))
-            second.metric("Price", format_price(row["Best price"]))
-            third.metric("BE", format_percent(row["Break-even %"], 1))
-            st.caption(f"Line vs split: {display_value(row['Line vs split'])} · Data quality: {display_value(row['Data quality'])}")
+            with st.container(horizontal=True, wrap=True, gap="small"):
+                st.metric("Money", format_percent(row["Money %"]), width="content")
+                st.metric("Bets", format_percent(row["Bets %"]), width="content")
+                st.metric("Gap", format_gap(row["Money minus Bets gap"]), width="content")
+            with st.container(horizontal=True, wrap=True, gap="small"):
+                st.metric("Best line", format_line(row["Best line"]), width="content")
+                st.metric("Price", format_price(row["Best price"]), width="content")
+                st.metric("BE", format_percent(row["Break-even %"], 1), width="content")
+            st.caption(f"Line vs split: {display_value(row['Line vs split'])} · Data quality: {display_value(row['Data quality'])} · Session: {display_value(row['Session movement'])}")
     if shown < len(data):
         if st.button(f"Show more ({len(data) - shown} remaining)", use_container_width=True, key="show_more_cards"):
             st.session_state["sharp_cards_shown"] = min(len(data), shown + 20)
@@ -346,13 +358,12 @@ def render_history() -> None:
         metrics = performance(rows)
         st.caption("Persistent database history. Small samples are not evidence of a profitable strategy.")
         metric_items = (("Stored observations", len(snapshots)), ("Unique settled baseline signals", metrics["settled"]), ("Wins", metrics["wins"]), ("Losses", metrics["losses"]), ("Pushes", metrics["pushes"]), ("Win rate", metrics["win_rate"]), ("Units", metrics["units"]), ("ROI", metrics["roi"]), ("Average CLV", metrics["average_clv"]), ("Positive CLV rate", metrics["positive_clv_rate"]))
-        for offset in range(0, len(metric_items), 2):
-            columns = st.columns(2)
-            for column, (label, value) in zip(columns, metric_items[offset:offset + 2]):
+        with st.container(horizontal=True, wrap=True, gap="small"):
+            for label, value in metric_items:
                 if label in {"Win rate", "ROI", "Positive CLV rate"}:
-                    column.metric(label, "N/A" if value is None else f"{value:.1%}")
+                    st.metric(label, "N/A" if value is None else f"{value:.1%}", width="content")
                 else:
-                    column.metric(label, "N/A" if value is None else f"{value:.3f}" if isinstance(value, float) else value)
+                    st.metric(label, "N/A" if value is None else f"{value:.3f}" if isinstance(value, float) else value, width="content")
         if not rows:
             st.info("No settled history is available yet.")
         elif metrics["settled"] < 30:
@@ -403,15 +414,22 @@ def main() -> None:
     if require_price:
         data = data[data["Best price"].notna()]
     data = add_session_movement(data).sort_values(["Start time", "Money minus Bets gap"], ascending=[True, False])
-    st.caption("Session movement compares this browser session only; it is not persistent historical backtesting.")
+    signature = card_filter_signature(sport, market, min_gap, max_tickets, hours, require_price)
+    if st.session_state.get("sharp_cards_filter_signature") != signature:
+        st.session_state["sharp_cards_filter_signature"] = signature
+        st.session_state["sharp_cards_shown"] = 20
+    st.caption(active_filter_summary(sport, market, hours))
     if data.empty:
         st.info("No matching signals for these filters. Expand Filters to adjust the screen.")
         render_history()
         return
+    refresh_time = data["Last refresh time"].max()
+    st.caption(f"Last data refresh: {format_card_start(refresh_time).replace('Start time ', '')}")
     view = st.radio("Results view", ["Cards", "Table"], horizontal=True, key="results_view")
     if view == "Cards":
         render_signal_cards(data)
     else:
+        st.caption("Session movement compares this browser session only; it is not persistent historical backtesting.")
         st.dataframe(data[DISPLAY_COLUMNS + ["Session movement"]], use_container_width=True, hide_index=True, column_config={
             "Start time": st.column_config.DatetimeColumn(format="MMM D, h:mm a"),
             "Last refresh time": st.column_config.DatetimeColumn(format="MMM D, h:mm:ss a"),
