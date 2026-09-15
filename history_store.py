@@ -137,13 +137,24 @@ class HistoryStore:
     def execute(self, sql: str, values: Iterable[Any] = ()): return self.connection.execute(sql.replace("?", "%s") if self.is_postgres else sql, tuple(values))
     def rows(self, cursor) -> list[dict[str, Any]]: return [dict(row) for row in cursor.fetchall()]
 
+    def result_columns(self) -> set[str]:
+        if self.is_postgres:
+            return {row["column_name"] for row in self.rows(self.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='results'"))}
+        return {row["name"] for row in self.rows(self.execute("PRAGMA table_info(results)"))}
+
+    def ensure_result_provenance_columns(self) -> None:
+        """Idempotently add only missing columns; real ALTER failures propagate."""
+        existing = self.result_columns()
+        for column, definition in (("result_source","TEXT"),("external_event_id","TEXT"),("source_status","TEXT"),("result_fetched_at_utc","TEXT")):
+            if column not in existing:
+                self.execute(f"ALTER TABLE results ADD COLUMN {column} {definition}")
+                existing.add(column)
+
     def initialize(self) -> None:
         ident = "BIGSERIAL PRIMARY KEY" if self.is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
         self.execute(f"CREATE TABLE IF NOT EXISTS snapshots (id {ident}, game_key TEXT NOT NULL, signal_key TEXT NOT NULL, observed_at_utc TEXT NOT NULL, sport TEXT NOT NULL, matchup TEXT NOT NULL, event_start_utc TEXT NOT NULL, market TEXT NOT NULL, selection TEXT NOT NULL, selection_side TEXT, split_line TEXT, bets_pct REAL, money_pct REAL, money_minus_bets_gap REAL, best_line TEXT, best_price INTEGER, break_even_pct REAL, data_quality TEXT, line_vs_split TEXT, UNIQUE(signal_key,observed_at_utc))")
         self.execute(f"CREATE TABLE IF NOT EXISTS results (id {ident}, game_key TEXT NOT NULL UNIQUE, sport TEXT NOT NULL, matchup TEXT NOT NULL, event_start_utc TEXT NOT NULL, away_score INTEGER NOT NULL, home_score INTEGER NOT NULL, settled_at_utc TEXT NOT NULL)")
-        for column, definition in (("result_source","TEXT"),("external_event_id","TEXT"),("source_status","TEXT"),("result_fetched_at_utc","TEXT")):
-            try: self.execute(f"ALTER TABLE results ADD COLUMN {column} {definition}")
-            except Exception: pass
+        self.ensure_result_provenance_columns()
         self.connection.commit()
 
     def insert_snapshot(self, item: dict[str, Any]) -> bool:
@@ -158,6 +169,15 @@ class HistoryStore:
         now=datetime.now(timezone.utc).isoformat(); self.execute(f"INSERT INTO results (game_key,sport,matchup,event_start_utc,away_score,home_score,settled_at_utc,result_source,external_event_id,source_status,result_fetched_at_utc) VALUES ({','.join([self.p]*11)}) ON CONFLICT(game_key) DO UPDATE SET away_score=excluded.away_score,home_score=excluded.home_score,settled_at_utc=excluded.settled_at_utc,result_source=excluded.result_source,external_event_id=excluded.external_event_id,source_status=excluded.source_status,result_fetched_at_utc=excluded.result_fetched_at_utc",(game,sport,matchup,start,away_score,home_score,settled_at_utc or now,result_source,external_event_id,source_status,now)); self.connection.commit()
     def snapshots(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM snapshots ORDER BY observed_at_utc"))
     def results(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM results"))
+    def unresolved_games(self, now=None) -> list[dict[str,Any]]:
+        now=(now or datetime.now(timezone.utc)).isoformat()
+        sql="SELECT s.game_key,s.sport,s.matchup,s.event_start_utc,MAX(CASE WHEN s.selection_side='away' AND s.market<>'Total' THEN s.selection END) away_team,MAX(CASE WHEN s.selection_side='home' AND s.market<>'Total' THEN s.selection END) home_team FROM snapshots s LEFT JOIN results r ON r.game_key=s.game_key WHERE r.game_key IS NULL AND s.event_start_utc < ? GROUP BY s.game_key,s.sport,s.matchup,s.event_start_utc"
+        return self.rows(self.execute(sql,(now,)))
+    def recently_settled_games(self, now=None, correction_hours=48) -> list[dict[str,Any]]:
+        from datetime import timedelta
+        cutoff=((now or datetime.now(timezone.utc))-timedelta(hours=correction_hours)).isoformat()
+        sql="SELECT r.*,MAX(CASE WHEN s.selection_side='away' AND s.market<>'Total' THEN s.selection END) away_team,MAX(CASE WHEN s.selection_side='home' AND s.market<>'Total' THEN s.selection END) home_team FROM results r LEFT JOIN snapshots s ON s.game_key=r.game_key WHERE r.settled_at_utc >= ? GROUP BY r.game_key"
+        return self.rows(self.execute(sql,(cutoff,)))
     def signal_snapshots(self, signal:str) -> list[dict[str,Any]]: return [x for x in self.snapshots() if x["signal_key"]==signal and is_valid_pregame(x)]
     def first_current_close(self, signal:str, at:Optional[datetime]=None) -> dict[str,Optional[dict[str,Any]]]:
         rows=self.signal_snapshots(signal); current=[x for x in rows if is_valid_pregame(x,at)]; quotes=[x for x in rows if executable_pregame(x)]

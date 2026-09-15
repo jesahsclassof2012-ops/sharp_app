@@ -83,3 +83,15 @@ def test_production_requires_postgresql(url):
 
 def test_explicit_sqlite_is_local_only():
     assert not HistoryStore("sqlite:///:memory:",production=False).is_postgres
+
+def test_provenance_migration_and_game_queries():
+    from datetime import datetime, timezone, timedelta
+    store=HistoryStore("sqlite:///:memory:"); assert {"result_source","external_event_id","source_status","result_fetched_at_utc"} <= store.result_columns()
+    store.ensure_result_provenance_columns()
+    past=item(observed_at_utc="2026-08-31T00:00:00Z",event_start_utc="2026-09-01T20:00:00Z",selection="DEN",selection_side="away")
+    home=item(observed_at_utc="2026-08-31T00:00:00Z",event_start_utc="2026-09-01T20:00:00Z",selection="KC",selection_side="home")
+    total=item(observed_at_utc="2026-08-31T00:00:00Z",event_start_utc="2026-09-01T20:00:00Z",market="Total",selection="Over",selection_side="over")
+    store.insert_snapshots([past,home,total]); games=store.unresolved_games(datetime(2026,9,2,tzinfo=timezone.utc)); assert len(games)==1 and games[0]["away_team"]=="DEN" and games[0]["home_team"]=="KC"
+    store.record_game_result("NFL","DEN vs KC",past["event_start_utc"],20,17,result_source="espn",external_event_id="x",source_status="final")
+    assert store.unresolved_games(datetime(2026,9,2,tzinfo=timezone.utc))==[]
+    recent=store.recently_settled_games(datetime.now(timezone.utc)); assert len(recent)==1 and recent[0]["external_event_id"]=="x"
