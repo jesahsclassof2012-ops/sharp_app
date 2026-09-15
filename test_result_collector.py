@@ -21,7 +21,7 @@ def test_discovery_nfl_and_ncaaf_date_requests(monkeypatch):
 
 def test_discovery_malformed_listing_fails_and_empty_slate_is_valid(monkeypatch):
     monkeypatch.setattr(rc,"fetch_json",lambda url: {"events":[]}); assert rc.fetch_events_for_date("NFL","20260901")==[]
-    monkeypatch.setattr(rc,"fetch_json",lambda url: {}); 
+    monkeypatch.setattr(rc,"fetch_json",lambda url: {})
     with pytest.raises(ValueError,match="events"): rc.fetch_events_for_date("NFL","20260901")
 
 def test_http_failures_propagate(monkeypatch):
