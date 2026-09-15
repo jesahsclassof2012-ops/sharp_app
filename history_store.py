@@ -5,7 +5,7 @@ import hashlib
 import os
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -137,10 +137,24 @@ class HistoryStore:
     def execute(self, sql: str, values: Iterable[Any] = ()): return self.connection.execute(sql.replace("?", "%s") if self.is_postgres else sql, tuple(values))
     def rows(self, cursor) -> list[dict[str, Any]]: return [dict(row) for row in cursor.fetchall()]
 
+    def result_columns(self) -> set[str]:
+        if self.is_postgres:
+            return {row["column_name"] for row in self.rows(self.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='results'"))}
+        return {row["name"] for row in self.rows(self.execute("PRAGMA table_info(results)"))}
+
+    def ensure_result_provenance_columns(self) -> None:
+        """Idempotently add only missing columns; real ALTER failures propagate."""
+        existing = self.result_columns()
+        for column, definition in (("result_source","TEXT"),("external_event_id","TEXT"),("source_status","TEXT"),("result_fetched_at_utc","TEXT")):
+            if column not in existing:
+                self.execute(f"ALTER TABLE results ADD COLUMN {column} {definition}")
+                existing.add(column)
+
     def initialize(self) -> None:
         ident = "BIGSERIAL PRIMARY KEY" if self.is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
         self.execute(f"CREATE TABLE IF NOT EXISTS snapshots (id {ident}, game_key TEXT NOT NULL, signal_key TEXT NOT NULL, observed_at_utc TEXT NOT NULL, sport TEXT NOT NULL, matchup TEXT NOT NULL, event_start_utc TEXT NOT NULL, market TEXT NOT NULL, selection TEXT NOT NULL, selection_side TEXT, split_line TEXT, bets_pct REAL, money_pct REAL, money_minus_bets_gap REAL, best_line TEXT, best_price INTEGER, break_even_pct REAL, data_quality TEXT, line_vs_split TEXT, UNIQUE(signal_key,observed_at_utc))")
         self.execute(f"CREATE TABLE IF NOT EXISTS results (id {ident}, game_key TEXT NOT NULL UNIQUE, sport TEXT NOT NULL, matchup TEXT NOT NULL, event_start_utc TEXT NOT NULL, away_score INTEGER NOT NULL, home_score INTEGER NOT NULL, settled_at_utc TEXT NOT NULL)")
+        self.ensure_result_provenance_columns()
         self.connection.commit()
 
     def insert_snapshot(self, item: dict[str, Any]) -> bool:
@@ -150,11 +164,53 @@ class HistoryStore:
         values = [game,signal,item["observed_at_utc"],item["sport"],item["matchup"],start] + [item.get(name) for name in fields[6:]]
         cur=self.execute(f"INSERT INTO snapshots ({','.join(fields)}) VALUES ({','.join([self.p]*len(fields))}) ON CONFLICT(signal_key,observed_at_utc) DO NOTHING",values); self.connection.commit(); return cur.rowcount > 0
     def insert_snapshots(self, items: Iterable[dict[str, Any]]) -> int: return sum(self.insert_snapshot(item) for item in items)
-    def record_game_result(self, sport:str, matchup:str, event_start_utc:Any, away_score:int, home_score:int, settled_at_utc:Optional[str]=None) -> None:
+    def record_game_result(self, sport:str, matchup:str, event_start_utc:Any, away_score:int, home_score:int, settled_at_utc:Optional[str]=None, result_source=None, external_event_id=None, source_status=None) -> None:
         start=normalize_utc(event_start_utc); game=game_key(sport,matchup,start)
-        self.execute(f"INSERT INTO results (game_key,sport,matchup,event_start_utc,away_score,home_score,settled_at_utc) VALUES ({','.join([self.p]*7)}) ON CONFLICT(game_key) DO UPDATE SET away_score=excluded.away_score,home_score=excluded.home_score,settled_at_utc=excluded.settled_at_utc",(game,sport,matchup,start,away_score,home_score,settled_at_utc or datetime.now(timezone.utc).isoformat())); self.connection.commit()
+        fetched_at=normalize_utc(datetime.now(timezone.utc)); settled=normalize_utc(settled_at_utc or fetched_at)
+        self.execute(f"INSERT INTO results (game_key,sport,matchup,event_start_utc,away_score,home_score,settled_at_utc,result_source,external_event_id,source_status,result_fetched_at_utc) VALUES ({','.join([self.p]*11)}) ON CONFLICT(game_key) DO UPDATE SET away_score=excluded.away_score,home_score=excluded.home_score,result_source=COALESCE(excluded.result_source,results.result_source),external_event_id=COALESCE(excluded.external_event_id,results.external_event_id),source_status=COALESCE(excluded.source_status,results.source_status),result_fetched_at_utc=excluded.result_fetched_at_utc",(game,sport,matchup,start,away_score,home_score,settled,result_source,external_event_id,source_status,fetched_at)); self.connection.commit()
     def snapshots(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM snapshots ORDER BY observed_at_utc"))
     def results(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM results"))
+    def unresolved_games(self, now=None, sports: Optional[Iterable[str]]=None, lookback_days: Optional[int]=None) -> list[dict[str,Any]]:
+        boundary=normalize_utc(now or datetime.now(timezone.utc)); values=[]; conditions=["r.game_key IS NULL",f"{self._timestamp_sql('s.event_start_utc')} < {self._timestamp_sql(self.p)}"]
+        values.append(boundary)
+        if lookback_days is not None:
+            if lookback_days < 0: raise ValueError("lookback_days must be non-negative")
+            values.append(normalize_utc((now or datetime.now(timezone.utc))-timedelta(days=lookback_days)))
+            conditions.append(f"{self._timestamp_sql('s.event_start_utc')} >= {self._timestamp_sql(self.p)}")
+        if sports is not None:
+            sports=tuple(sports)
+            if not sports: return []
+            conditions.append(f"s.sport IN ({','.join([self.p]*len(sports))})"); values.extend(sports)
+        sql=self._game_identity_query("s.game_key,s.sport,s.matchup,s.event_start_utc", "LEFT JOIN results r ON r.game_key=s.game_key", " AND ".join(conditions))
+        return self.rows(self.execute(sql,values))
+    def recently_settled_games(self, now=None, correction_hours=48, sports: Optional[Iterable[str]]=None) -> list[dict[str,Any]]:
+        reference=now or datetime.now(timezone.utc); cutoff=normalize_utc(reference-timedelta(hours=correction_hours)); values=[cutoff]
+        conditions=[f"{self._timestamp_sql('r.settled_at_utc')} >= {self._timestamp_sql(self.p)}"]
+        if sports is not None:
+            sports=tuple(sports)
+            if not sports: return []
+            conditions.append(f"r.sport IN ({','.join([self.p]*len(sports))})"); values.extend(sports)
+        # The identity CTE is one row per game, so PostgreSQL never has to group r.*.
+        sql=self._game_identity_query("r.*", "JOIN results r ON r.game_key=i.game_key", " AND ".join(conditions), identity_first=True)
+        return self.rows(self.execute(sql,values))
+
+    def _timestamp_sql(self, expression: str) -> str:
+        """Portable UTC TEXT comparison, including existing Z/+00:00 records."""
+        return f"({expression})::timestamptz" if self.is_postgres else f"datetime({expression})"
+
+    def _game_identity_query(self, columns: str, join: str, where: str, identity_first: bool = False) -> str:
+        """Return a portable query with ambiguity-safe stored away/home identities."""
+        identity = """WITH team_identity AS (
+            SELECT game_key,
+              CASE WHEN COUNT(DISTINCT CASE WHEN selection_side='away' AND market<>'Total' AND selection IS NOT NULL THEN selection END)=1
+                   THEN MIN(CASE WHEN selection_side='away' AND market<>'Total' AND selection IS NOT NULL THEN selection END) END AS away_team,
+              CASE WHEN COUNT(DISTINCT CASE WHEN selection_side='home' AND market<>'Total' AND selection IS NOT NULL THEN selection END)=1
+                   THEN MIN(CASE WHEN selection_side='home' AND market<>'Total' AND selection IS NOT NULL THEN selection END) END AS home_team
+            FROM snapshots GROUP BY game_key
+        ) """
+        if identity_first:
+            return f"{identity} SELECT {columns},i.away_team,i.home_team FROM team_identity i {join} WHERE {where}"
+        return f"{identity} SELECT {columns},i.away_team,i.home_team FROM snapshots s JOIN team_identity i ON i.game_key=s.game_key {join} WHERE {where} GROUP BY {columns},i.away_team,i.home_team"
     def signal_snapshots(self, signal:str) -> list[dict[str,Any]]: return [x for x in self.snapshots() if x["signal_key"]==signal and is_valid_pregame(x)]
     def first_current_close(self, signal:str, at:Optional[datetime]=None) -> dict[str,Optional[dict[str,Any]]]:
         rows=self.signal_snapshots(signal); current=[x for x in rows if is_valid_pregame(x,at)]; quotes=[x for x in rows if executable_pregame(x)]

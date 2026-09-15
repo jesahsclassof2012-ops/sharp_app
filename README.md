@@ -19,7 +19,38 @@ Streamlit Community Cloud app secrets/environment. In deployed Streamlit, the
 History section shows a configuration warning when it is absent; the live
 scanner remains available. SQLite fallback is only for local development.
 
-Results are recorded through `HistoryStore.record_game_result(...)`; each
-baseline signal settles against its own captured snapshot line. Automated score
-ingestion is intentionally not implemented because this repository has no
-verified results-data source configured.
+## Automated result ingestion
+
+`result_collector.py` settles results from ESPN's full date-scoped scoreboard:
+`https://site.web.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=YYYYMMDD&limit=500` and, for NCAAF, the explicit union of
+`.../college-football/scoreboard?dates=YYYYMMDD&limit=500&groups=80` (FBS)
+and `...&groups=81` (FCS). The collector requests the stored UTC date plus adjacent
+dates, then deduplicates provider events by `(sport, external_event_id)`.
+Conflicting duplicate copies fail the run rather than choosing a result.
+
+The hourly **Settle Sharp Signal results** workflow uses the same
+`DATABASE_URL` secret as the history collector and Streamlit History UI.
+GitHub cron may run late. Missing/malformed provider responses fail the run;
+they are never interpreted as an empty slate.
+
+Only explicit ESPN `final` events are recorded. The collector finds unresolved
+past games and rechecks settled games for 48 hours. It matches sport, explicit
+away/home identities, and kickoff within 12 hours; it never swaps sides,
+fuzzy-matches schools, or guesses ambiguous/missing identity. The canonical
+Sharp Signal `game_key` remains authoritative; ESPN's event ID is provenance
+metadata (`result_source`, `external_event_id`, `source_status`, and
+`result_fetched_at_utc`). An existing provider ID is never silently changed.
+
+Each game keeps one result row. Rechecks preserve the original
+`settled_at_utc`; an explicit corrected final updates its scores and fetch
+timestamp. The captured entry snapshot line determines grading, while a later
+valid pregame closing snapshot determines CLV. Final scores do not determine
+CLV.
+
+Automated settlement supports **NFL and NCAAF only**. The hourly workflow
+checks unresolved games from the prior 14 days and separately rechecks settled
+results for corrected finals during the following 48 hours. Older unresolved
+games remain stored and can be recovered with a manual, safety-equivalent
+backfill, for example: `python result_collector.py --backfill-days 120`.
+Backfills retain final-only settlement, deterministic team matching, ambiguity
+rejection, provider failure propagation, and duplicate-event protection.
