@@ -41,29 +41,41 @@ creating a workflow dispatch event.
 1. Authenticate Wrangler to the intended Cloudflare account.
 2. Create the fine-grained GitHub token described above; do not grant database,
    contents, administration, or organization permissions.
-3. From this directory, install the Worker secret interactively:
+3. From this directory, create the temporary local secrets file
+   `.env.production` with dotenv syntax:
 
    ```sh
-   pnpm exec wrangler secret put GITHUB_TOKEN
+   GITHUB_TOKEN=<actual-token>
    ```
 
-   **Important:** Cloudflare documents that `wrangler secret put` creates a new
-   Worker version and deploys it immediately. Run this only during an approved
-   Phase 2 deployment, never as a local validation command.
-4. Deploy the Worker and its configured Cron Trigger:
+   `.env*` is gitignored. Keep this file local, never commit it, and never paste
+   the actual token into this README or any source file.
+4. Perform the reviewed initial deployment with the local secrets file:
 
    ```sh
-   pnpm exec wrangler deploy
+   pnpm exec wrangler deploy --secrets-file .env.production
    ```
 
-5. Cloudflare documents that Cron Trigger changes can take several minutes, up
+   Cloudflare documents that `--secrets-file` uploads dotenv or JSON secrets
+   together with the Worker version. This one deployment applies the Worker
+   source, `GITHUB_TOKEN`, committed non-secret GitHub variables,
+   `workers_dev = false`, `preview_urls = false`, and the
+   `*/15 * * * *` Cron Trigger from `wrangler.toml`.
+5. After successful deployment, securely delete the local `.env.production`
+   file (for example, `rm .env.production` in a POSIX shell).
+6. Cloudflare documents that Cron Trigger changes can take several minutes, up
    to 15 minutes, to propagate. Verify it in Workers & Pages → the Worker →
    Settings → Triggers → Cron Triggers, or through Cloudflare's Worker schedules
    API.
-6. After a trigger fires, find the GitHub Actions run for **Collect Sharp Signal
+7. After a trigger fires, find the GitHub Actions run for **Collect Sharp Signal
    history**. Confirm `event=workflow_dispatch`, `head_branch=main`, and the
    expected main SHA, then inspect the `Collect snapshots` log for
    `Inserted N snapshots.`
+
+For later secret rotation after the Worker exists, Cloudflare documents
+`pnpm exec wrangler secret put GITHUB_TOKEN` as a secret update command. It
+creates a new Worker version and deploys it immediately, so use it only in an
+approved, reviewed update—not as the initial Worker creation step.
 
 ## Rollback and migration safety
 
