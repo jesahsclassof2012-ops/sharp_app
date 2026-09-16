@@ -49,6 +49,7 @@ RESULT_TABLE_COLUMNS = [
 ]
 RESULT_VIEW_OPTIONS = ["Cards", "Table"]
 DEFAULT_RESULTS_VIEW = "Table"
+MIXED_MARKET_CLV_MESSAGE = "Average CLV is not combined across different market types because CLV definitions are market-specific."
 
 
 def display_value(value: Any) -> str:
@@ -508,7 +509,7 @@ def render_history() -> None:
                 else:
                     st.metric(label, "N/A" if value is None else f"{value:.3f}" if isinstance(value, float) else value, width="content")
         if metrics["settled"] and metrics["average_clv"] is None and metrics["positive_clv_rate"] is not None:
-            st.caption("Average CLV is not combined across markets because Moneyline and Spread/Total CLV use different units.")
+            st.caption(MIXED_MARKET_CLV_MESSAGE)
         if metrics["invalid_results"]:
             st.warning(f"Excluded {metrics['invalid_results']} row(s) with an invalid settlement result from performance metrics.")
         if not filtered_rows:

@@ -253,3 +253,19 @@ def test_zero_gap_or_malformed_line_cannot_be_baseline_before_later_valid_quote(
     store.insert_snapshots([zero, malformed, valid])
     entries = store.baseline_entries()
     assert len(entries) == 1 and entries[0]["observed_at_utc"] == valid["observed_at_utc"]
+
+
+def test_zero_gap_valid_spread_is_excluded_before_later_positive_gap_baseline():
+    store = HistoryStore("sqlite:///:memory:")
+    zero = snapshot(market="Spread", best_line="+3", best_price=-110, data_quality="OK", money_minus_bets_gap=0)
+    later = snapshot(observed_at_utc="2026-09-13T01:00:00Z", market="Spread", best_line="+3", best_price=-110, data_quality="OK", money_minus_bets_gap=1)
+    store.insert_snapshots([zero, later])
+    entries = store.baseline_entries()
+    assert len(entries) == 1
+    assert entries[0]["observed_at_utc"] == later["observed_at_utc"]
+
+
+def test_mixed_market_clv_caption_describes_market_specific_definitions():
+    assert app.MIXED_MARKET_CLV_MESSAGE == (
+        "Average CLV is not combined across different market types because CLV definitions are market-specific."
+    )
