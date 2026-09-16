@@ -54,12 +54,16 @@ def american_profit(odds: int, stake: float = 1.0) -> float:
 
 def settle_selection(market: str, side: str, line: Optional[float], away_score: int, home_score: int) -> str:
     side = side.lower()
-    if market == "Moneyline": value = away_score - home_score if side == "away" else home_score - away_score
+    if market == "Moneyline":
+        if side not in {"away", "home"}: raise ValueError("Moneyline settlement requires away or home side")
+        value = away_score - home_score if side == "away" else home_score - away_score
     elif market == "Spread":
         if line is None: raise ValueError("Spread settlement requires captured line")
+        if side not in {"away", "home"}: raise ValueError("Spread settlement requires away or home side")
         value = away_score - home_score + line if side == "away" else home_score - away_score + line
     elif market == "Total":
         if line is None: raise ValueError("Total settlement requires captured line")
+        if side not in {"over", "under"}: raise ValueError("Total settlement requires over or under side")
         value = away_score + home_score - line if side == "over" else line - away_score - home_score
     else: raise ValueError(f"Unsupported market: {market}")
     return "win" if value > 0 else "loss" if value < 0 else "push"
@@ -244,15 +248,42 @@ class HistoryStore:
             result=scores.get(entry["game_key"])
             if not result: continue
             close=self.first_current_close(entry["signal_key"])["close"]
-            row=dict(entry); row["bet_result"]=settle_selection(row["market"],row.get("selection_side") or "",line_value(row.get("best_line")),result["away_score"],result["home_score"])
-            row["clv"]=calculate_clv(row["market"],row.get("selection_side") or "",line_value(row.get("best_line")),line_value(close.get("best_line")),row.get("best_price"),close.get("best_price")) if close and close["observed_at_utc"] > entry["observed_at_utc"] else None
+            row=dict(entry)
+            row.update({key: result.get(key) for key in (
+                "away_score", "home_score", "result_source", "external_event_id",
+                "source_status", "settled_at_utc", "result_fetched_at_utc",
+            )})
+            try:
+                row["bet_result"]=settle_selection(row["market"],row.get("selection_side") or "",line_value(row.get("best_line")),result["away_score"],result["home_score"])
+            except ValueError as exc:
+                # A malformed historical row remains inspectable but cannot affect
+                # settled counts, units, ROI, or CLV.
+                row["bet_result"] = "invalid"
+                row["settlement_error"] = str(exc)
+            if close and close["observed_at_utc"] > entry["observed_at_utc"]:
+                row.update({
+                    "closing_line": close.get("best_line"),
+                    "closing_price": close.get("best_price"),
+                    "closing_observed_at_utc": close.get("observed_at_utc"),
+                })
+                row["clv"]=calculate_clv(row["market"],row.get("selection_side") or "",line_value(row.get("best_line")),line_value(close.get("best_line")),row.get("best_price"),close.get("best_price")) if row["bet_result"] != "invalid" else None
+            else:
+                row.update({"closing_line": None, "closing_price": None, "closing_observed_at_utc": None, "clv": None})
             output.append(row)
         return output
 
 
 def performance(rows: Iterable[dict[str,Any]]) -> dict[str,Any]:
-    data=[row for row in rows if row.get("best_price") is not None]; wins=sum(x["bet_result"]=="win" for x in data); losses=sum(x["bet_result"]=="loss" for x in data); pushes=sum(x["bet_result"]=="push" for x in data); units=sum(american_profit(x["best_price"]) if x["bet_result"]=="win" else -1 if x["bet_result"]=="loss" else 0 for x in data); graded=wins+losses; clv=[x["clv"] for x in data if x.get("clv") is not None]; prices=[x["best_price"] for x in data]; bre=[x["break_even_pct"] for x in data if x.get("break_even_pct") is not None]
-    return {"settled":len(data),"wins":wins,"losses":losses,"pushes":pushes,"win_rate":wins/graded if graded else None,"units":units,"roi":units/len(data) if data else None,"average_american_odds":sum(prices)/len(prices) if prices else None,"average_break_even_probability":sum(bre)/len(bre) if bre else None,"average_clv":sum(clv)/len(clv) if clv else None,"positive_clv_rate":sum(x>0 for x in clv)/len(clv) if clv else None}
+    source = [row for row in rows if row.get("best_price") is not None]
+    data = [row for row in source if row.get("bet_result") in {"win", "loss", "push"}]
+    invalid_results = len(source) - len(data)
+    wins=sum(x["bet_result"]=="win" for x in data); losses=sum(x["bet_result"]=="loss" for x in data); pushes=sum(x["bet_result"]=="push" for x in data)
+    units=sum(american_profit(x["best_price"]) if x["bet_result"]=="win" else -1 if x["bet_result"]=="loss" else 0 for x in data)
+    graded=wins+losses; clv=[x["clv"] for x in data if x.get("clv") is not None]; bre=[x["break_even_pct"] for x in data if x.get("break_even_pct") is not None]
+    # Composition is determined from every valid settled row, even when a
+    # particular signal lacks a later closing quote and therefore has no CLV.
+    clv_markets={x.get("market") for x in data}
+    return {"settled":len(data),"invalid_results":invalid_results,"wins":wins,"losses":losses,"pushes":pushes,"win_rate":wins/graded if graded else None,"units":units,"roi":units/len(data) if data else None,"average_break_even_pct":sum(bre)/len(bre) if bre else None,"average_clv":sum(clv)/len(clv) if clv and len(clv_markets)==1 else None,"clv_market":next(iter(clv_markets)) if len(clv_markets)==1 else None,"positive_clv_rate":sum(x>0 for x in clv)/len(clv) if clv else None}
 
 
 def bucket_performance(rows: Iterable[dict[str,Any]], field:str="money_minus_bets_gap") -> dict[str,dict[str,Any]]:

@@ -42,6 +42,14 @@ DISPLAY_COLUMNS = [
     "Money minus Bets gap", "Signal", "Split line", "Best line", "Best price",
     "Break-even %", "Line vs split", "Data quality", "Last refresh time",
 ]
+RESULT_TABLE_COLUMNS = [
+    "Matchup", "Start time", "Market", "Selection", "Bets %", "Money %",
+    "Money minus Bets gap", "Split line", "Best line", "Best price",
+    "Break-even %", "Line vs split", "Data quality", "Session movement",
+]
+RESULT_VIEW_OPTIONS = ["Cards", "Table"]
+DEFAULT_RESULTS_VIEW = "Table"
+MIXED_MARKET_CLV_MESSAGE = "Average CLV is not combined across different market types because CLV definitions are market-specific."
 
 
 def display_value(value: Any) -> str:
@@ -72,6 +80,23 @@ def format_line(value: Any) -> str:
     return display_value(value)
 
 
+def format_clv(value: Any, market: Any) -> str:
+    """Keep CLV units explicit rather than combining points and probability."""
+    if value is None or pd.isna(value):
+        return "N/A"
+    if market == "Moneyline":
+        return f"{float(value) * 100:+.1f} pp"
+    if market in {"Spread", "Total"}:
+        return f"{float(value):+g} pts"
+    return "N/A"
+
+
+def format_final_score(away_score: Any, home_score: Any) -> str:
+    if away_score is None or home_score is None or pd.isna(away_score) or pd.isna(home_score):
+        return "N/A"
+    return f"{int(away_score)}-{int(home_score)}"
+
+
 def format_card_start(value: Any) -> str:
     if value is None or pd.isna(value):
         return "Start time N/A"
@@ -95,6 +120,15 @@ def active_filter_summary(sport: str, market: str, hours: int, max_money: float 
 
 def card_filter_signature(sport: str, market: str, min_gap: float, max_tickets: float, max_money: float, hours: int, require_price: bool) -> tuple[Any, ...]:
     return sport, market, min_gap, max_tickets, max_money, hours, require_price
+
+
+def default_results_view() -> str:
+    """Expose the first-session default independently from Streamlit state."""
+    return DEFAULT_RESULTS_VIEW
+
+
+def matching_signals_label(count: int) -> str:
+    return f"{count} matching signal{'s' if count != 1 else ''}"
 
 
 def apply_share_filters(data: pd.DataFrame, max_tickets: float, max_money: float) -> pd.DataFrame:
@@ -131,6 +165,60 @@ def insufficient_sample_message(sport: str) -> str:
     return f"Insufficient{qualifier} sample size: fewer than 30 settled observations."
 
 
+def card_market_presentation(row: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return market-aware card fields without changing the raw scanner row."""
+    market, side = row.get("Market"), row.get("Selection side")
+    best_line, split = row.get("Best line"), row.get("Split line")
+    if market == "Total":
+        current, _ = parse_total(str(best_line or ""))
+        split_total, _ = parse_total("o" + str(split or ""))
+        return [("Current total", "N/A" if current is None else f"{current:g}"),
+                ("Split total", "N/A" if split_total is None else f"{split_total:g}")]
+    if market == "Spread":
+        current = line_number(str(best_line or ""))
+        consensus, _ = parse_spread(str(split or ""))
+        index = 0 if side == "away" else 1 if side == "home" else None
+        selected_split = consensus[index] if consensus and index is not None else None
+        return [("Current spread", "N/A" if current is None else f"{current:+g}"),
+                ("Split spread", "N/A" if selected_split is None else f"{selected_split:+g}")]
+    return []
+
+
+def history_audit_rows(rows: list[dict[str, Any]], limit: int = 50) -> pd.DataFrame:
+    """Build a bounded, newest-first row-level audit view from settled entries."""
+    records = []
+    for row in sorted(rows, key=lambda item: str(item.get("event_start_utc") or ""), reverse=True)[:limit]:
+        records.append({
+            "Event start": row.get("event_start_utc"), "Sport": row.get("sport"),
+            "Matchup": row.get("matchup"), "Market": row.get("market"),
+            "Selection": row.get("selection"), "Entry line": row.get("best_line"),
+            "Entry price": format_price(row.get("best_price")), "Bets %": format_percent(row.get("bets_pct")),
+            "Money %": format_percent(row.get("money_pct")), "Gap": format_gap(row.get("money_minus_bets_gap")),
+            "Final score": format_final_score(row.get("away_score"), row.get("home_score")),
+            "Result": row.get("bet_result"), "Closing line": row.get("closing_line") or "N/A",
+            "Closing price": format_price(row.get("closing_price")), "CLV": format_clv(row.get("clv"), row.get("market")),
+            "Result source": row.get("result_source") or "N/A",
+        })
+    return pd.DataFrame(records)
+
+
+def history_breakdown_frame(summary: dict[str, dict[str, Any]]) -> pd.DataFrame:
+    """Format summary values without presenting average American odds or mixed CLV."""
+    records = []
+    for bucket, metrics in summary.items():
+        records.append({
+            "Bucket": bucket, "Sample": metrics["settled"], "Wins": metrics["wins"],
+            "Losses": metrics["losses"], "Pushes": metrics["pushes"], "Units": metrics["units"],
+            "Win rate": format_percent(None if metrics["win_rate"] is None else metrics["win_rate"] * 100, 1),
+            "ROI": format_percent(None if metrics["roi"] is None else metrics["roi"] * 100, 1),
+            "Average break-even %": format_percent(metrics["average_break_even_pct"], 1),
+            "Average CLV": format_clv(metrics["average_clv"], metrics["clv_market"]),
+            "Positive CLV rate": format_percent(None if metrics["positive_clv_rate"] is None else metrics["positive_clv_rate"] * 100, 1),
+            "Invalid results excluded": metrics["invalid_results"],
+        })
+    return pd.DataFrame(records).set_index("Bucket") if records else pd.DataFrame()
+
+
 def render_signal_cards(data: pd.DataFrame) -> None:
     """Render bounded, touch-friendly native cards without dropping rows."""
     shown = st.session_state.get("sharp_cards_shown", 20)
@@ -144,10 +232,12 @@ def render_signal_cards(data: pd.DataFrame) -> None:
                 st.metric("Bets", format_percent(row["Bets %"]), width="content")
                 st.metric("Gap", format_gap(row["Money minus Bets gap"]), width="content")
             with st.container(horizontal=True, wrap=True, gap="small"):
-                st.metric("Best line", format_line(row["Best line"]), width="content")
+                for label, value in card_market_presentation(row.to_dict()):
+                    st.metric(label, value, width="content")
                 st.metric("Price", format_price(row["Best price"]), width="content")
-                st.metric("BE", format_percent(row["Break-even %"], 1), width="content")
-            st.caption(f"Line vs split: {display_value(row['Line vs split'])} · Data quality: {display_value(row['Data quality'])} · Session: {display_value(row['Session movement'])}")
+                st.metric("Break-even", format_percent(row["Break-even %"], 1), width="content")
+            relationship = "" if row["Market"] == "Moneyline" else f"Line vs split: {display_value(row['Line vs split'])} · "
+            st.caption(f"{relationship}Data quality: {display_value(row['Data quality'])} · Session: {display_value(row['Session movement'])}")
     if shown < len(data):
         if st.button(f"Show more ({len(data) - shown} remaining)", use_container_width=True, key="show_more_cards"):
             st.session_state["sharp_cards_shown"] = min(len(data), shown + 20)
@@ -403,13 +493,25 @@ def render_history() -> None:
         selected_sport = st.selectbox("History sport", options, key="history_sport")
         filtered_snapshots, filtered_rows, metrics = history_scope_metrics(snapshots, rows, selected_sport)
         st.caption("Persistent database history. Small samples are not evidence of a profitable strategy.")
-        metric_items = (("Stored observations", len(filtered_snapshots)), ("Unique settled baseline signals", metrics["settled"]), ("Wins", metrics["wins"]), ("Losses", metrics["losses"]), ("Pushes", metrics["pushes"]), ("Win rate", metrics["win_rate"]), ("Units", metrics["units"]), ("ROI", metrics["roi"]), ("Average CLV", metrics["average_clv"]), ("Positive CLV rate", metrics["positive_clv_rate"]))
+        with st.expander("Methodology", expanded=False):
+            st.markdown("""**Baseline entry:** earliest snapshot for a signal with a valid pregame timestamp, `Data quality = OK`, an executable best price, a valid Spread/Total line where required, and `Money % − Bets % > 0`.
+
+**Result:** settlement uses the captured baseline-entry line, never a later or closing line. **Close:** last captured valid executable pregame quote; it is not an official sportsbook closing line.
+
+**ROI:** one unit is risked per settled baseline signal. A win uses the captured American entry price; loss is −1 unit; push is 0 net units. Pushes remain in the ROI denominator and are excluded from the win-rate denominator.
+
+**CLV:** positive means the baseline entry was bettor-favorable versus that captured pregame close. CLV is not evidence of predictive value or profitability.""")
+        metric_items = (("Stored observations", len(filtered_snapshots)), ("Unique settled baseline signals", metrics["settled"]), ("Wins", metrics["wins"]), ("Losses", metrics["losses"]), ("Pushes", metrics["pushes"]), ("Win rate", metrics["win_rate"]), ("Units", metrics["units"]), ("ROI", metrics["roi"]), ("Average CLV", format_clv(metrics["average_clv"], metrics["clv_market"])), ("Positive CLV rate", metrics["positive_clv_rate"]))
         with st.container(horizontal=True, wrap=True, gap="small"):
             for label, value in metric_items:
                 if label in {"Win rate", "ROI", "Positive CLV rate"}:
                     st.metric(label, "N/A" if value is None else f"{value:.1%}", width="content")
                 else:
                     st.metric(label, "N/A" if value is None else f"{value:.3f}" if isinstance(value, float) else value, width="content")
+        if metrics["settled"] and metrics["average_clv"] is None and metrics["positive_clv_rate"] is not None:
+            st.caption(MIXED_MARKET_CLV_MESSAGE)
+        if metrics["invalid_results"]:
+            st.warning(f"Excluded {metrics['invalid_results']} row(s) with an invalid settlement result from performance metrics.")
         if not filtered_rows:
             st.info("No settled history is available yet.")
         elif metrics["settled"] < 30:
@@ -418,7 +520,15 @@ def render_history() -> None:
         selected = st.selectbox("Breakdown", list(breakdowns), key="history_breakdown")
         summary = bucket_performance(filtered_rows, breakdowns[selected])
         if summary:
-            st.dataframe(pd.DataFrame.from_dict(summary, orient="index"), use_container_width=True)
+            st.dataframe(history_breakdown_frame(summary), use_container_width=True)
+        st.subheader("Recent settled signals")
+        audit = history_audit_rows(filtered_rows)
+        if audit.empty:
+            st.info("No settled signals are available for this history scope.")
+        else:
+            st.dataframe(audit, use_container_width=True, hide_index=True, column_config={
+                "Event start": st.column_config.DatetimeColumn(format="MMM D, h:mm a"),
+            })
         with st.expander("Exports", expanded=False):
             for label, records, prefix in (("Export snapshots CSV", filtered_snapshots, "snapshots"), ("Export settled results CSV", filtered_rows, "settled_results")):
                 output = io.StringIO()
@@ -473,14 +583,19 @@ def main() -> None:
         return
     refresh_time = data["Last refresh time"].max()
     st.caption(f"Last data refresh: {format_card_start(refresh_time).replace('Start time ', '')}")
-    view = st.radio("Results view", ["Cards", "Table"], horizontal=True, key="results_view")
+    st.subheader(matching_signals_label(len(data)))
+    view = st.radio("Results view", RESULT_VIEW_OPTIONS, index=RESULT_VIEW_OPTIONS.index(default_results_view()), horizontal=True, key="results_view")
     if view == "Cards":
         render_signal_cards(data)
     else:
         st.caption("Session movement compares this browser session only; it is not persistent historical backtesting.")
-        st.dataframe(data[DISPLAY_COLUMNS + ["Session movement"]], use_container_width=True, hide_index=True, column_config={
+        st.dataframe(data[RESULT_TABLE_COLUMNS], use_container_width=True, hide_index=True, column_config={
             "Start time": st.column_config.DatetimeColumn(format="MMM D, h:mm a"),
-            "Last refresh time": st.column_config.DatetimeColumn(format="MMM D, h:mm:ss a"),
+            "Bets %": st.column_config.NumberColumn(format="%.0f%%"),
+            "Money %": st.column_config.NumberColumn(format="%.0f%%"),
+            "Money minus Bets gap": st.column_config.NumberColumn("Gap", format="%+.1f"),
+            "Best price": st.column_config.NumberColumn("Price", format="%+d"),
+            "Break-even %": st.column_config.NumberColumn("Break-even", format="%.1f%%"),
         })
     render_history()
 
