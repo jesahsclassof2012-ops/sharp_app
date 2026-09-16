@@ -185,13 +185,15 @@ def test_script_entrypoint_runs_and_missing_database_url_fails():
     assert result.returncode != 0
     assert "DATABASE_URL" in (result.stdout+result.stderr)
 
-def test_routine_collects_nfl_and_ncaaf_but_ignores_unsupported_sports():
-    ncaaf_event=rc.parse_event(event(),"NCAAF")
-    unsupported=[game(sport=sport) for sport in ("NBA","MLB","NHL","NCAAB")]
-    store=FakeStore([game(),game(sport="NCAAF"),*unsupported]); requests=[]
-    summary=rc.collect_results(store,lambda sport,date: requests.append(sport) or ([parsed()] if sport=="NFL" else [ncaaf_event]))
-    assert summary["unresolved_checked"]==2 and summary["new_results_recorded"]==2
-    assert set(requests)=={"NFL","NCAAF"} and summary["unmatched_skipped"]==0
+def test_routine_collects_all_supported_sports_but_ignores_unsupported_sports():
+    supported=list(rc.SUPPORTED_SPORTS)
+    store=FakeStore([game(sport=sport) for sport in supported]+[game(sport="WNBA")]); requests=[]
+    def fetch(sport,date):
+        requests.append(sport)
+        return [rc.parse_event(event(event_id=sport),sport)]
+    summary=rc.collect_results(store,fetch)
+    assert summary["unresolved_checked"]==len(supported) and summary["new_results_recorded"]==len(supported)
+    assert set(requests)==set(supported) and summary["unmatched_skipped"]==0
 
 def test_routine_lookback_and_backfill_cli_arguments():
     assert rc.parse_args([]).backfill_days is None

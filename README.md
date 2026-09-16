@@ -21,11 +21,14 @@ scanner remains available. SQLite fallback is only for local development.
 
 ## Automated result ingestion
 
-`result_collector.py` settles results from ESPN's full date-scoped scoreboard:
-`https://site.web.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=YYYYMMDD&limit=500` and, for NCAAF, the explicit union of
-`.../college-football/scoreboard?dates=YYYYMMDD&limit=500&groups=80` (FBS)
-and `...&groups=81` (FCS). The collector requests the stored UTC date plus adjacent
-dates, then deduplicates provider events by `(sport, external_event_id)`.
+`result_collector.py` settles NFL, NCAAF, NBA, NCAAB, MLB, and NHL results
+from ESPN's date-scoped scoreboards. Its explicit provider families are
+`football/nfl`, `football/college-football`, `basketball/nba`,
+`basketball/mens-college-basketball`, `baseball/mlb`, and `hockey/nhl`.
+NCAAF uses the explicit union of `groups=80` (FBS) and `groups=81` (FCS), and
+NCAAB uses `groups=50` for Division I rather than ESPN's smaller default board.
+The collector requests the stored UTC date plus adjacent dates, then
+deduplicates provider events by `(sport, external_event_id)`.
 Conflicting duplicate copies fail the run rather than choosing a result.
 
 The hourly **Settle Sharp Signal results** workflow uses the same
@@ -47,10 +50,12 @@ timestamp. The captured entry snapshot line determines grading, while a later
 valid pregame closing snapshot determines CLV. Final scores do not determine
 CLV.
 
-Automated settlement supports **NFL and NCAAF only**. The hourly workflow
-checks unresolved games from the prior 14 days and separately rechecks settled
-results for corrected finals during the following 48 hours. Older unresolved
-games remain stored and can be recovered with a manual, safety-equivalent
-backfill, for example: `python result_collector.py --backfill-days 120`.
-Backfills retain final-only settlement, deterministic team matching, ambiguity
-rejection, provider failure propagation, and duplicate-event protection.
+The hourly workflow checks unresolved games from the prior 14 days and
+separately rechecks settled results for corrected finals during the following
+48 hours. Older unresolved games remain stored and can be recovered with a
+manual, safety-equivalent backfill, for example:
+`python result_collector.py --backfill-days 120`. Backfills retain final-only
+settlement, deterministic team matching, ambiguity rejection, provider failure
+propagation, and duplicate-event protection. For same-team MLB doubleheaders,
+a unique nearest kickoff may match; a tied or otherwise ambiguous candidate is
+left unresolved.
