@@ -91,6 +91,15 @@ def test_existing_external_id_is_preferred_and_never_silently_replaced():
     assert rc.match_stored_game(game(external_event_id="correct"),[other,provider])["event"]["external_event_id"]=="correct"
     assert rc.match_stored_game(game(external_event_id="correct"),[other])["status"]=="unmatched"
 
+@pytest.mark.parametrize("sport", ["NFL", "NCAAF"])
+def test_football_multiple_candidates_remain_ambiguous_regardless_of_order(sport):
+    first=rc.parse_event(event(event_id="first",date="2026-09-01T19:00:00Z"),sport)
+    second=rc.parse_event(event(event_id="second",date="2026-09-01T21:00:00Z"),sport)
+    stored=game(sport=sport,event_start_utc="2026-09-01T20:00:00Z")
+    assert rc.match_stored_game(stored,[first,second])["status"]=="ambiguous"
+    assert rc.match_stored_game(stored,[second,first])["status"]=="ambiguous"
+    assert rc.match_stored_game(dict(stored,external_event_id="second"),[first,second])["event"]["external_event_id"]=="second"
+
 def test_date_planning_includes_adjacent_dates_and_deduplicates():
     dates=rc.provider_dates_for_games([game(),game(event_start_utc="2026-09-01T23:59:00+00:00"),game(event_start_utc="2026-09-02T00:01:00Z")])
     assert dates==["20260831","20260901","20260902","20260903"]
@@ -185,13 +194,15 @@ def test_script_entrypoint_runs_and_missing_database_url_fails():
     assert result.returncode != 0
     assert "DATABASE_URL" in (result.stdout+result.stderr)
 
-def test_routine_collects_nfl_and_ncaaf_but_ignores_unsupported_sports():
-    ncaaf_event=rc.parse_event(event(),"NCAAF")
-    unsupported=[game(sport=sport) for sport in ("NBA","MLB","NHL","NCAAB")]
-    store=FakeStore([game(),game(sport="NCAAF"),*unsupported]); requests=[]
-    summary=rc.collect_results(store,lambda sport,date: requests.append(sport) or ([parsed()] if sport=="NFL" else [ncaaf_event]))
-    assert summary["unresolved_checked"]==2 and summary["new_results_recorded"]==2
-    assert set(requests)=={"NFL","NCAAF"} and summary["unmatched_skipped"]==0
+def test_routine_collects_all_supported_sports_but_ignores_unsupported_sports():
+    supported=list(rc.SUPPORTED_SPORTS)
+    store=FakeStore([game(sport=sport) for sport in supported]+[game(sport="WNBA")]); requests=[]
+    def fetch(sport,date):
+        requests.append(sport)
+        return [rc.parse_event(event(event_id=sport),sport)]
+    summary=rc.collect_results(store,fetch)
+    assert summary["unresolved_checked"]==len(supported) and summary["new_results_recorded"]==len(supported)
+    assert set(requests)==set(supported) and summary["unmatched_skipped"]==0
 
 def test_routine_lookback_and_backfill_cli_arguments():
     assert rc.parse_args([]).backfill_days is None

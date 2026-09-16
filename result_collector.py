@@ -7,9 +7,18 @@ from typing import Any, Iterable
 import requests
 from history_store import HistoryStore, normalize_utc
 
-SCOREBOARD_BASE = "https://site.web.api.espn.com/apis/site/v2/sports/football"
-LEAGUES = {"NFL": "nfl", "NCAAF": "college-football"}
-SUPPORTED_SPORTS = tuple(LEAGUES)
+SCOREBOARD_BASE = "https://site.web.api.espn.com/apis/site/v2/sports"
+# ESPN scoreboards are organized by sport family and league.  Groups are
+# explicit for college boards because the default response can be curated.
+SPORT_CONFIG = {
+    "NFL": {"sport_path": "football", "league_path": "nfl", "groups": ()},
+    "NCAAF": {"sport_path": "football", "league_path": "college-football", "groups": ("80", "81")},
+    "NBA": {"sport_path": "basketball", "league_path": "nba", "groups": ()},
+    "NCAAB": {"sport_path": "basketball", "league_path": "mens-college-basketball", "groups": ("50",)},
+    "MLB": {"sport_path": "baseball", "league_path": "mlb", "groups": ()},
+    "NHL": {"sport_path": "hockey", "league_path": "nhl", "groups": ()},
+}
+SUPPORTED_SPORTS = tuple(SPORT_CONFIG)
 ROUTINE_LOOKBACK_DAYS = 14
 TOLERANCE_SECONDS = 12 * 60 * 60
 HTTP_HEADERS = {"User-Agent": "SharpSignal/2.0"}
@@ -18,11 +27,20 @@ _RUN_FETCH_CACHE: dict[str, dict[str, Any]] = {}
 ALIASES = {
     "NFL": {"arizonacardinals":"ari","atlantafalcons":"atl","baltimoreravens":"bal","buffalobills":"buf","carolinapanthers":"car","chicagobears":"chi","cincinnatibengals":"cin","clevelandbrowns":"cle","dallascowboys":"dal","denverbroncos":"den","detroitlions":"det","greenbaypackers":"gb","houstontexans":"hou","indianapoliscolts":"ind","jacksonvillejaguars":"jax","kansascitychiefs":"kc","lasvegasraiders":"lv","losangeleschargers":"lac","losangelesrams":"lar","miamidolphins":"mia","minnesotavikings":"min","newenglandpatriots":"ne","neworleanssaints":"no","newyorkgiants":"nyg","newyorkjets":"nyj","philadelphiaeagles":"phi","pittsburghsteelers":"pit","sanfrancisco49ers":"sf","seattleseahawks":"sea","tampabaybuccaneers":"tb","tennesseetitans":"ten","washingtoncommanders":"was"},
     "NCAAF": {"miamifl":"miamifl","miamihurricanes":"miamifl","miamioh":"miamioh","miamiohredhawks":"miamioh"},
+    # Observed ScoresAndOdds codes versus ESPN scoreboard abbreviations.
+    "NBA": {"gsw":"gs", "nop":"no", "nyk":"ny", "sas":"sa", "uta":"utah", "was":"wsh"},
+    "NCAAB": {
+        "ac":"acu", "camp":"cam", "chs":"chst", "csb":"csub", "ind":"iu",
+        "lil":"luc", "mcns":"mcn", "mizz":"miz", "mtu":"mtsu", "murr":"mur",
+        "neom":"oma", "peay":"apsu", "sbon":"sbu", "scus":"upst", "txam":"tam",
+    },
+    "MLB": {"cws":"chw"},
+    "NHL": {"uta":"utah"},
 }
 
 def _identifier(value: Any) -> str: return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
 def normalize_team(sport: str, value: Any) -> str:
-    if sport not in LEAGUES: raise ValueError(f"Unsupported sport: {sport}")
+    if sport not in SPORT_CONFIG: raise ValueError(f"Unsupported sport: {sport}")
     key = _identifier(value); return ALIASES[sport].get(key, key)
 def _ref(value: Any) -> str | None: return value.get("$ref") if isinstance(value, dict) else None
 
@@ -73,7 +91,7 @@ def _parse_competitor(item: Any, sport: str, final: bool) -> tuple[str, dict[str
     return side, team, _score(competitor.get("score")) if final else None
 
 def parse_event(payload: dict[str,Any], sport: str) -> dict[str,Any]:
-    if sport not in LEAGUES or not isinstance(payload,dict): raise ValueError("invalid ESPN event")
+    if sport not in SPORT_CONFIG or not isinstance(payload,dict): raise ValueError("invalid ESPN event")
     if payload.get("id") in (None,"") or not payload.get("date"): raise ValueError("event is missing id or kickoff")
     start = normalize_utc(payload["date"]); competitions = payload.get("competitions")
     if not isinstance(competitions,list) or len(competitions)!=1: raise ValueError("event must have one competition")
@@ -89,19 +107,23 @@ def parse_event(payload: dict[str,Any], sport: str) -> dict[str,Any]:
     if category=="final" and set(scores)!={"away","home"}: raise ValueError("final event is missing scores")
     return {"sport":sport,"external_event_id":str(payload["id"]),"event_start_utc":start,"status":category,"source_status":category,"away":teams["away"],"home":teams["home"],"away_score":scores.get("away"),"home_score":scores.get("home")}
 
+def scoreboard_url(sport: str, date: Any, group: str | None = None) -> str:
+    """Build the explicit ESPN scoreboard URL for one supported sport/date."""
+    if sport not in SPORT_CONFIG: raise ValueError(f"Unsupported sport: {sport}")
+    config=SPORT_CONFIG[sport]
+    url=(f"{SCOREBOARD_BASE}/{config['sport_path']}/{config['league_path']}"
+         f"/scoreboard?dates={date}&limit=500")
+    return f"{url}&groups={group}" if group else url
+
 def fetch_events_for_date(sport: str, date: Any) -> list[dict[str,Any]]:
-    if sport not in LEAGUES: raise ValueError(f"Unsupported sport: {sport}")
+    if sport not in SPORT_CONFIG: raise ValueError(f"Unsupported sport: {sport}")
     if isinstance(date,datetime): date=date.astimezone(timezone.utc).strftime("%Y%m%d")
     elif hasattr(date,"strftime"): date=date.strftime("%Y%m%d")
     elif not re.fullmatch(r"\d{8}",str(date)): raise ValueError("date must be YYYYMMDD")
-    # ESPN's default college-football board was empirically only group 80 on a
-    # full Saturday. Query both FBS (80) and FCS (81); collector-level event
-    # deduplication checks overlapping IDs for conflicts.
-    groups=("80","81") if sport=="NCAAF" else (None,)
+    groups=SPORT_CONFIG[sport]["groups"] or (None,)
     parsed=[]
     for group in groups:
-        suffix=f"&groups={group}" if group else ""
-        listing=fetch_json(f"{SCOREBOARD_BASE}/{LEAGUES[sport]}/scoreboard?dates={date}&limit=500{suffix}"); events=listing.get("events")
+        listing=fetch_json(scoreboard_url(sport,date,group)); events=listing.get("events")
         if not isinstance(events,list): raise ValueError("ESPN scoreboard is missing events")
         if any(not isinstance(event,dict) for event in events): raise ValueError("ESPN scoreboard has malformed event")
         parsed.extend(parse_event(event,sport) for event in events)
@@ -140,17 +162,29 @@ def match_stored_game(game: dict[str,Any], provider_events: Iterable[dict[str,An
             if normalize_team(game["sport"],game["home_team"]) not in provider_team_keys(game["sport"],event["home"]): continue
             if abs((_kickoff(event["event_start_utc"])-start).total_seconds())<=TOLERANCE_SECONDS: candidates.append(event)
         except (KeyError,TypeError,ValueError): continue
-    return {"status":"matched","event":candidates[0]} if len(candidates)==1 else {"status":"ambiguous" if len(candidates)>1 else "unmatched","event":None}
+    if len(candidates)==1: return {"status":"matched","event":candidates[0]}
+    if not candidates: return {"status":"unmatched","event":None}
+    # Only MLB needs a doubleheader exception to the established fail-closed
+    # cardinality rule. NFL/NCAAF and the other leagues retain their original
+    # behavior: more than one exact candidate is ambiguous.
+    if game.get("sport") != "MLB": return {"status":"ambiguous","event":None}
+    # Same-team MLB doubleheaders can share the normal 12-hour tolerance. A
+    # uniquely nearest start is deterministic; an equal nearest time fails
+    # closed rather than depending on ESPN response order.
+    distances=[abs((_kickoff(event["event_start_utc"])-start).total_seconds()) for event in candidates]
+    closest=min(distances)
+    nearest=[event for event,distance in zip(candidates,distances) if distance==closest]
+    return {"status":"matched","event":nearest[0]} if len(nearest)==1 else {"status":"ambiguous","event":None}
 
 def collect_results(store: HistoryStore, fetcher=fetch_events_for_date, now: datetime | None = None, unresolved_lookback_days: int | None = ROUTINE_LOOKBACK_DAYS) -> dict[str,int]:
     """Perform one fail-closed settlement run; provider errors intentionally escape."""
     unresolved=store.unresolved_games(now,sports=SUPPORTED_SPORTS,lookback_days=unresolved_lookback_days)
     recent=store.recently_settled_games(now,correction_hours=48,sports=SUPPORTED_SPORTS)
     # Defensive guard for non-HistoryStore implementations used by callers/tests.
-    unresolved=[game for game in unresolved if game.get("sport") in LEAGUES]
-    recent=[game for game in recent if game.get("sport") in LEAGUES]
+    unresolved=[game for game in unresolved if game.get("sport") in SPORT_CONFIG]
+    recent=[game for game in recent if game.get("sport") in SPORT_CONFIG]
     planned=unresolved+recent; raw_events=[]
-    for sport in LEAGUES:
+    for sport in SUPPORTED_SPORTS:
         sport_games=[game for game in planned if game.get("sport")==sport]
         for date in provider_dates_for_games(sport_games): raw_events.extend(fetcher(sport,date))
     events=deduplicate_provider_events(raw_events)
@@ -176,7 +210,7 @@ def format_summary(summary: dict[str,int]) -> str:
     return "\n".join((f"Checked {summary['unresolved_checked']} unresolved games.",f"Rechecked {summary['recent_rechecked']} recent results.",f"Fetched {summary['provider_events_fetched']} ESPN events.",f"Matched {summary['matched_finals']} final games.",f"Recorded {summary['new_results_recorded']} new results.",f"Updated {summary['corrected_results_updated']} corrected results.",f"Skipped {summary['not_final_skipped']} not final.",f"Skipped {summary['unmatched_skipped']} unmatched.",f"Skipped {summary['ambiguous_skipped']} ambiguous.",f"Skipped {summary['incomplete_identity_skipped']} incomplete identity."))
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
-    parser=argparse.ArgumentParser(description="Settle NFL/NCAAF Sharp Signal results.")
+    parser=argparse.ArgumentParser(description="Settle Sharp Signal results for all supported scanner sports.")
     parser.add_argument("--backfill-days",type=int,metavar="DAYS",help="Expand unresolved-game discovery beyond the routine 14-day window.")
     args=parser.parse_args(argv)
     if args.backfill_days is not None and args.backfill_days <= 0: parser.error("--backfill-days must be a positive integer")
