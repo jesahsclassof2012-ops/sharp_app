@@ -15,3 +15,11 @@ GITHUB_REF = "main"
 
 [secrets]
 required = ["GITHUB_TOKEN"]
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+persist = true
