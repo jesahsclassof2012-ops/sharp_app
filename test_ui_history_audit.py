@@ -156,6 +156,38 @@ def test_mixed_market_clv_is_not_averaged_but_positive_rate_remains():
     assert frame.loc["spread", "Average CLV"] == "+0.5 pts"
 
 
+@pytest.mark.parametrize(
+    "other_market",
+    ["Spread", "Total"],
+)
+def test_missing_moneyline_clv_still_suppresses_mixed_market_average(other_market):
+    metrics = performance([
+        {"best_price": -110, "bet_result": "win", "market": "Moneyline", "clv": None},
+        {"best_price": -110, "bet_result": "loss", "market": other_market, "clv": 0.5},
+    ])
+    assert metrics["average_clv"] is None
+    assert metrics["clv_market"] is None
+    assert metrics["positive_clv_rate"] == 1
+
+
+def test_spread_total_mixture_suppresses_average_clv():
+    metrics = performance([
+        {"best_price": -110, "bet_result": "win", "market": "Spread", "clv": 0.5},
+        {"best_price": -110, "bet_result": "loss", "market": "Total", "clv": 0.25},
+    ])
+    assert metrics["average_clv"] is None and metrics["positive_clv_rate"] == 1
+
+
+@pytest.mark.parametrize("market", ["Spread", "Moneyline"])
+def test_single_market_clv_average_uses_available_quotes_only(market):
+    metrics = performance([
+        {"best_price": -110, "bet_result": "win", "market": market, "clv": 0.5},
+        {"best_price": -110, "bet_result": "loss", "market": market, "clv": None},
+    ])
+    assert metrics["average_clv"] == 0.5 and metrics["clv_market"] == market
+    assert metrics["positive_clv_rate"] == 1
+
+
 def test_analytics_rows_include_result_and_closing_evidence():
     store = HistoryStore("sqlite:///:memory:")
     entry = snapshot(best_line="+3")
@@ -179,6 +211,26 @@ def test_closing_quote_does_not_change_baseline_settlement():
     assert row["clv"] == 0.5
 
 
+@pytest.mark.parametrize(
+    ("market", "side", "line"),
+    [("Moneyline", "invalid", None), ("Spread", "invalid", "+3"), ("Total", "invalid", "o45.5")],
+)
+def test_invalid_stored_side_is_auditable_without_aborting_history(market, side, line):
+    store = HistoryStore("sqlite:///:memory:")
+    invalid = snapshot(market=market, selection="Bad", selection_side=side, best_line=line)
+    valid = snapshot(selection="KC", selection_side="home", observed_at_utc="2026-09-13T01:00:00Z")
+    store.insert_snapshots([invalid, valid])
+    store.record_game_result("NFL", "DEN vs KC", invalid["event_start_utc"], 24, 20)
+    rows = store.analytics_rows()
+    bad = next(row for row in rows if row["selection"] == "Bad")
+    good = next(row for row in rows if row["selection"] == "KC")
+    assert bad["bet_result"] == "invalid" and bad["settlement_error"]
+    assert good["bet_result"] == "loss"
+    metrics = performance(rows)
+    assert metrics["settled"] == 1 and metrics["invalid_results"] == 1
+    assert metrics["units"] == -1 and metrics["roi"] == -1
+
+
 def test_baseline_is_earliest_simultaneously_qualifying_snapshot():
     store = HistoryStore("sqlite:///:memory:")
     negative = snapshot(money_minus_bets_gap=-1)
@@ -186,3 +238,18 @@ def test_baseline_is_earliest_simultaneously_qualifying_snapshot():
     valid = snapshot(observed_at_utc="2026-09-13T01:00:00Z")
     store.insert_snapshots([negative, bad_quality, valid])
     assert store.baseline_entries()[0]["observed_at_utc"] == valid["observed_at_utc"]
+
+
+@pytest.mark.parametrize(
+    ("market", "bad_line"),
+    [("Spread", "broken"), ("Total", "broken")],
+)
+def test_zero_gap_or_malformed_line_cannot_be_baseline_before_later_valid_quote(market, bad_line):
+    store = HistoryStore("sqlite:///:memory:")
+    zero = snapshot(market=market, best_line=bad_line, money_minus_bets_gap=0)
+    malformed = snapshot(market=market, best_line=bad_line, observed_at_utc="2026-09-13T00:30:00Z")
+    valid_line = "+3" if market == "Spread" else "o45.5"
+    valid = snapshot(market=market, best_line=valid_line, observed_at_utc="2026-09-13T01:00:00Z")
+    store.insert_snapshots([zero, malformed, valid])
+    entries = store.baseline_entries()
+    assert len(entries) == 1 and entries[0]["observed_at_utc"] == valid["observed_at_utc"]
