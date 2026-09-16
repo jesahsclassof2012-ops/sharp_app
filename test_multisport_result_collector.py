@@ -46,6 +46,19 @@ def test_every_supported_sport_parses_explicit_final_and_nonfinal(sport):
     assert nonfinal["status"] == "scheduled" and nonfinal["away_score"] is None
 
 
+@pytest.mark.parametrize("sport", tuple(SPORT_PATHS))
+@pytest.mark.parametrize("score", [112, 112.0, "112"])
+def test_every_supported_sport_accepts_only_integer_compatible_final_scores(sport, score):
+    assert rc.parse_event(event(scores=(score, score)), sport)["away_score"] == 112
+
+
+@pytest.mark.parametrize("sport", tuple(SPORT_PATHS))
+@pytest.mark.parametrize("score", [None, "", "112.5", -1, "-1", "bad"])
+def test_every_supported_sport_rejects_missing_or_invalid_final_scores(sport, score):
+    with pytest.raises(ValueError, match="score"):
+        rc.parse_event(event(scores=(score, "107")), sport)
+
+
 @pytest.mark.parametrize("name", ["STATUS_FINAL", "STATUS_FINAL_OT", "STATUS_FINAL_2OT", "STATUS_FINAL_SO", "STATUS_FINAL_10"])
 def test_completed_overtime_shootout_and_extra_inning_statuses_are_final(name):
     assert rc.parse_status({"type": {"name": name, "state": "post", "completed": True, "description": "Final/OT"}}) == "final"
