@@ -74,6 +74,13 @@ def test_new_sport_matching_rejects_wrong_and_reversed_teams(sport):
     assert rc.match_stored_game(dict(base, away_team="CCC"), [provider])["status"] == "unmatched"
 
 
+@pytest.mark.parametrize("sport", ("NBA", "NCAAB", "NHL"))
+def test_non_mlb_multiple_candidates_remain_fail_closed(sport):
+    first = rc.parse_event(event(event_id="first", date="2026-09-01T19:00:00Z"), sport)
+    second = rc.parse_event(event(event_id="second", date="2026-09-01T21:00:00Z"), sport)
+    assert rc.match_stored_game(game(sport=sport), [first, second])["status"] == "ambiguous"
+
+
 def _mlb_event(event_id, hour):
     return rc.parse_event(event(event_id=event_id, away="SD", home="LAD", date=f"2025-09-28T{hour:02d}:00:00Z", scores=("5", "3")), "MLB")
 
@@ -100,4 +107,3 @@ def test_nonfootball_correction_and_collector_write_are_preserved():
     summary = rc.collect_results(store, lambda sport, date: [provider], datetime(2026, 9, 2, tzinfo=timezone.utc))
     assert len(store.writes) == 1 and summary["corrected_results_updated"] == 1
     assert store.writes[0][1]["result_source"] == "espn_scoreboard"
-

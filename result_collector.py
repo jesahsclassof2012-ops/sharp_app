@@ -156,7 +156,11 @@ def match_stored_game(game: dict[str,Any], provider_events: Iterable[dict[str,An
         except (KeyError,TypeError,ValueError): continue
     if len(candidates)==1: return {"status":"matched","event":candidates[0]}
     if not candidates: return {"status":"unmatched","event":None}
-    # Doubleheaders can share teams inside the normal 12-hour tolerance. A
+    # Only MLB needs a doubleheader exception to the established fail-closed
+    # cardinality rule. NFL/NCAAF and the other leagues retain their original
+    # behavior: more than one exact candidate is ambiguous.
+    if game.get("sport") != "MLB": return {"status":"ambiguous","event":None}
+    # Same-team MLB doubleheaders can share the normal 12-hour tolerance. A
     # uniquely nearest start is deterministic; an equal nearest time fails
     # closed rather than depending on ESPN response order.
     distances=[abs((_kickoff(event["event_start_utc"])-start).total_seconds()) for event in candidates]
