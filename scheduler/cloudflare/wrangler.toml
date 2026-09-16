@@ -1,6 +1,8 @@
 name = "sharp-app-history-scheduler"
 main = "src/index.js"
 compatibility_date = "2026-09-15"
+workers_dev = false
+preview_urls = false
 
 [triggers]
 crons = ["*/15 * * * *"]
