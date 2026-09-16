@@ -1,0 +1,15 @@
+name = "sharp-app-history-scheduler"
+main = "src/index.js"
+compatibility_date = "2026-09-15"
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+[vars]
+GITHUB_OWNER = "jesahsclassof2012-ops"
+GITHUB_REPO = "sharp_app"
+GITHUB_WORKFLOW = "collect-history.yml"
+GITHUB_REF = "main"
+
+[secrets]
+required = ["GITHUB_TOKEN"]
