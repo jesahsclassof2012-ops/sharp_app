@@ -30,6 +30,7 @@ from sharp_core import (
     parse_spread,
     parse_team_code,
     parse_total,
+    validate_executable_total,
     validate_percentages,
 )
 from history_store import HistoryStore, bucket_performance, performance
@@ -202,6 +203,20 @@ def history_audit_rows(rows: list[dict[str, Any]], limit: int = 50) -> pd.DataFr
     return pd.DataFrame(records)
 
 
+def history_metric_items(stored_observations: int, metrics: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
+    """Use compatibility defaults for optional display-only performance fields."""
+    average_clv = metrics.get("average_clv")
+    clv_market = metrics.get("clv_market")
+    return (
+        ("Stored observations", stored_observations),
+        ("Unique settled baseline signals", metrics["settled"]), ("Wins", metrics["wins"]),
+        ("Losses", metrics["losses"]), ("Pushes", metrics["pushes"]),
+        ("Win rate", metrics["win_rate"]), ("Units", metrics["units"]), ("ROI", metrics["roi"]),
+        ("Average CLV", format_clv(average_clv, clv_market)),
+        ("Positive CLV rate", metrics["positive_clv_rate"]),
+    )
+
+
 def history_breakdown_frame(summary: dict[str, dict[str, Any]]) -> pd.DataFrame:
     """Format summary values without presenting average American odds or mixed CLV."""
     records = []
@@ -211,10 +226,10 @@ def history_breakdown_frame(summary: dict[str, dict[str, Any]]) -> pd.DataFrame:
             "Losses": metrics["losses"], "Pushes": metrics["pushes"], "Units": metrics["units"],
             "Win rate": format_percent(None if metrics["win_rate"] is None else metrics["win_rate"] * 100, 1),
             "ROI": format_percent(None if metrics["roi"] is None else metrics["roi"] * 100, 1),
-            "Average break-even %": format_percent(metrics["average_break_even_pct"], 1),
-            "Average CLV": format_clv(metrics["average_clv"], metrics["clv_market"]),
+            "Average break-even %": format_percent(metrics.get("average_break_even_pct", metrics.get("average_break_even_probability")), 1),
+            "Average CLV": format_clv(metrics.get("average_clv"), metrics.get("clv_market")),
             "Positive CLV rate": format_percent(None if metrics["positive_clv_rate"] is None else metrics["positive_clv_rate"] * 100, 1),
-            "Invalid results excluded": metrics["invalid_results"],
+            "Invalid results excluded": metrics.get("invalid_results", 0),
         })
     return pd.DataFrame(records).set_index("Bucket") if records else pd.DataFrame()
 
@@ -425,6 +440,11 @@ def parse_scoresandodds_html(html: str, refreshed_at: datetime) -> pd.DataFrame:
         ]
         for selection, bets, money, quote_key in selections:
             best_line, best_price = quotes.get(quote_key, (None, None))
+            total_flags = DataQualityFlags()
+            if market == "Total":
+                total_is_valid, total_flags = validate_executable_total(best_line, current_split)
+                if not total_is_valid:
+                    best_line, best_price = None, None
             odds_flags = parse_american_odds(str(best_price) if best_price is not None else "N/A")[1]
             gap, _ = calculate_money_minus_bets_screen(money, bets)
             # A readable observation, not an inferred probability or rating.
@@ -438,7 +458,7 @@ def parse_scoresandodds_html(html: str, refreshed_at: datetime) -> pd.DataFrame:
                 "Best line": best_line or "N/A", "Best price": best_price,
                 "Break-even %": round(break_even * 100, 2) if break_even is not None else None,
                 "Line vs split": line_vs_split,
-                "Data quality": quality_text(*card_flags, percentage_flags, money_flags, odds_flags),
+                "Data quality": quality_text(*card_flags, percentage_flags, money_flags, total_flags, odds_flags),
                 "Last refresh time": refreshed_at.astimezone(PACIFIC),
             })
     return pd.DataFrame(rows, columns=DISPLAY_COLUMNS + ["Selection side"])
@@ -501,16 +521,16 @@ def render_history() -> None:
 **ROI:** one unit is risked per settled baseline signal. A win uses the captured American entry price; loss is −1 unit; push is 0 net units. Pushes remain in the ROI denominator and are excluded from the win-rate denominator.
 
 **CLV:** positive means the baseline entry was bettor-favorable versus that captured pregame close. CLV is not evidence of predictive value or profitability.""")
-        metric_items = (("Stored observations", len(filtered_snapshots)), ("Unique settled baseline signals", metrics["settled"]), ("Wins", metrics["wins"]), ("Losses", metrics["losses"]), ("Pushes", metrics["pushes"]), ("Win rate", metrics["win_rate"]), ("Units", metrics["units"]), ("ROI", metrics["roi"]), ("Average CLV", format_clv(metrics["average_clv"], metrics["clv_market"])), ("Positive CLV rate", metrics["positive_clv_rate"]))
+        metric_items = history_metric_items(len(filtered_snapshots), metrics)
         with st.container(horizontal=True, wrap=True, gap="small"):
             for label, value in metric_items:
                 if label in {"Win rate", "ROI", "Positive CLV rate"}:
                     st.metric(label, "N/A" if value is None else f"{value:.1%}", width="content")
                 else:
                     st.metric(label, "N/A" if value is None else f"{value:.3f}" if isinstance(value, float) else value, width="content")
-        if metrics["settled"] and metrics["average_clv"] is None and metrics["positive_clv_rate"] is not None:
+        if metrics["settled"] and metrics.get("average_clv") is None and metrics["positive_clv_rate"] is not None:
             st.caption(MIXED_MARKET_CLV_MESSAGE)
-        if metrics["invalid_results"]:
+        if metrics.get("invalid_results", 0):
             st.warning(f"Excluded {metrics['invalid_results']} row(s) with an invalid settlement result from performance metrics.")
         if not filtered_rows:
             st.info("No settled history is available yet.")

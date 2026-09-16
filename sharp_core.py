@@ -8,6 +8,9 @@ from typing import Optional, Tuple, Dict, Any
 from dataclasses import dataclass
 
 
+MAX_TOTAL_DEVIATION_FROM_SPLIT = 15.0
+
+
 @dataclass
 class DataQualityFlags:
     """Flags indicating data quality issues."""
@@ -131,6 +134,31 @@ def parse_total(total_str: str) -> Tuple[Optional[float], DataQualityFlags]:
     
     flags.missing_total = True
     return None, flags
+
+
+def validate_executable_total(executable_line: Optional[str], split_line: Optional[str]) -> Tuple[bool, DataQualityFlags]:
+    """Fail closed when an executable Total or its split reference is unusable."""
+    flags = DataQualityFlags()
+    executable_text = str(executable_line or "").strip()
+    split_text = str(split_line or "").strip()
+    executable, _ = parse_total(executable_text)
+    split, _ = parse_total("o" + split_text)
+    if executable is None:
+        if executable_text.upper() in {"", "N/A"}:
+            flags.missing_total = True
+        else:
+            flags.invalid_total = True
+        return False, flags
+    if split is None:
+        if split_text.upper() in {"", "N/A"}:
+            flags.missing_total = True
+        else:
+            flags.invalid_total = True
+        return False, flags
+    if abs(executable - split) > MAX_TOTAL_DEVIATION_FROM_SPLIT:
+        flags.invalid_total = True
+        return False, flags
+    return True, flags
 
 
 def parse_american_odds(odds_str: str) -> Tuple[Optional[int], DataQualityFlags]:
