@@ -216,3 +216,93 @@ def test_main_default_and_backfill_pass_explicit_safe_windows(monkeypatch):
     monkeypatch.setattr(rc,"collect_results",lambda supplied,**kwargs: calls.append(kwargs["unresolved_lookback_days"]) or {"unresolved_checked":0,"recent_rechecked":0,"provider_events_fetched":0,"matched_finals":0,"new_results_recorded":0,"corrected_results_updated":0,"not_final_skipped":0,"unmatched_skipped":0,"ambiguous_skipped":0,"incomplete_identity_skipped":0})
     rc.main([]); rc.main(["--backfill-days","120"])
     assert calls==[14,120]
+
+
+def assert_per_sport_totals(summary):
+    for counter in rc.SUMMARY_COUNTERS:
+        assert summary[counter] == sum(
+            summary["by_sport"][sport][counter] for sport in rc.SUPPORTED_SPORTS
+        )
+
+
+def test_per_sport_summary_is_zero_filled_and_preserves_aggregate_format():
+    summary=rc.collect_results(FakeStore(),lambda sport,date: [])
+    assert list(summary["by_sport"]) == list(rc.SUPPORTED_SPORTS)
+    assert all(
+        counts == {counter: 0 for counter in rc.SUMMARY_COUNTERS}
+        for counts in summary["by_sport"].values()
+    )
+    assert_per_sport_totals(summary)
+    lines=rc.format_summary(summary).splitlines()
+    assert lines[:10] == [
+        "Checked 0 unresolved games.", "Rechecked 0 recent results.",
+        "Fetched 0 ESPN events.", "Matched 0 final games.",
+        "Recorded 0 new results.", "Updated 0 corrected results.",
+        "Skipped 0 not final.", "Skipped 0 unmatched.",
+        "Skipped 0 ambiguous.", "Skipped 0 incomplete identity.",
+    ]
+    assert lines[10] == "Per-sport settlement:"
+    assert [line.split(":",1)[0] for line in lines[11:]] == list(rc.SUPPORTED_SPORTS)
+    assert all(
+        "unresolved=0 recent=0 events=0 finals=0 new=0 corrected=0 "
+        "not_final=0 unmatched=0 ambiguous=0 incomplete_identity=0" in line
+        for line in lines[11:]
+    )
+
+
+def test_per_sport_counters_track_existing_outcomes_independently():
+    unresolved=[
+        game(sport="NFL"),
+        game(sport="NBA"),
+        game(sport="NCAAB",away_team="BAD"),
+        game(sport="NHL"),
+        game(sport="MLB",away_team=None),
+    ]
+    recent=[game(sport="NCAAF",away_score=18,home_score=17)]
+    events_by_sport={
+        "NFL": [rc.parse_event(event(event_id="nfl",scores=(21,17)),"NFL")],
+        "NCAAF": [rc.parse_event(event(event_id="ncaaf",scores=(20,17)),"NCAAF")],
+        "NBA": [rc.parse_event(event(event_id="nba",status="scheduled",scores=(None,None)),"NBA")],
+        "NCAAB": [rc.parse_event(event(event_id="ncaab",scores=(20,17)),"NCAAB")],
+        "MLB": [],
+        "NHL": [
+            rc.parse_event(event(event_id="nhl-1",scores=(4,3)),"NHL"),
+            rc.parse_event(event(event_id="nhl-2",scores=(4,3)),"NHL"),
+        ],
+    }
+    summary=rc.collect_results(FakeStore(unresolved,recent),lambda sport,date: events_by_sport[sport])
+    by_sport=summary["by_sport"]
+    assert by_sport["NFL"] == {**{counter: 0 for counter in rc.SUMMARY_COUNTERS}, "unresolved_checked":1, "provider_events_fetched":1, "matched_finals":1, "new_results_recorded":1}
+    assert by_sport["NCAAF"] == {**{counter: 0 for counter in rc.SUMMARY_COUNTERS}, "recent_rechecked":1, "provider_events_fetched":1, "matched_finals":1, "corrected_results_updated":1}
+    assert by_sport["NBA"] == {**{counter: 0 for counter in rc.SUMMARY_COUNTERS}, "unresolved_checked":1, "provider_events_fetched":1, "not_final_skipped":1}
+    assert by_sport["NCAAB"] == {**{counter: 0 for counter in rc.SUMMARY_COUNTERS}, "unresolved_checked":1, "provider_events_fetched":1, "unmatched_skipped":1}
+    assert by_sport["MLB"] == {**{counter: 0 for counter in rc.SUMMARY_COUNTERS}, "unresolved_checked":1, "incomplete_identity_skipped":1}
+    assert by_sport["NHL"] == {**{counter: 0 for counter in rc.SUMMARY_COUNTERS}, "unresolved_checked":1, "provider_events_fetched":2, "ambiguous_skipped":1}
+    assert_per_sport_totals(summary)
+
+
+def test_unchanged_recent_result_is_final_but_not_a_correction_per_sport():
+    store=FakeStore(recent=[game(sport="MLB",away_score=5,home_score=3)])
+    summary=rc.collect_results(
+        store,
+        lambda sport,date: [rc.parse_event(event(event_id="mlb",scores=(5,3)),"MLB")] if sport=="MLB" else [],
+    )
+    assert summary["by_sport"]["MLB"]["matched_finals"] == 1
+    assert summary["by_sport"]["MLB"]["corrected_results_updated"] == 0
+    assert_per_sport_totals(summary)
+
+
+def test_provider_event_counts_are_sport_scoped_after_deduplication_and_unsupported_ignored():
+    store=FakeStore([game(sport="NFL"),game(sport="MLB"),game(sport="WNBA")])
+    def fetch(sport,date):
+        if sport=="NFL":
+            duplicate=rc.parse_event(event(event_id="same",scores=(21,17)),"NFL")
+            return [duplicate,dict(duplicate)]
+        if sport=="MLB":
+            return [rc.parse_event(event(event_id="same",scores=(5,3)),"MLB")]
+        return []
+    summary=rc.collect_results(store,fetch)
+    assert summary["by_sport"]["NFL"]["provider_events_fetched"] == 1
+    assert summary["by_sport"]["MLB"]["provider_events_fetched"] == 1
+    assert "WNBA" not in summary["by_sport"]
+    assert_per_sport_totals(summary)

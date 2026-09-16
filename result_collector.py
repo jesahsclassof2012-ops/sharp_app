@@ -176,7 +176,18 @@ def match_stored_game(game: dict[str,Any], provider_events: Iterable[dict[str,An
     nearest=[event for event,distance in zip(candidates,distances) if distance==closest]
     return {"status":"matched","event":nearest[0]} if len(nearest)==1 else {"status":"ambiguous","event":None}
 
-def collect_results(store: HistoryStore, fetcher=fetch_events_for_date, now: datetime | None = None, unresolved_lookback_days: int | None = ROUTINE_LOOKBACK_DAYS) -> dict[str,int]:
+SUMMARY_COUNTERS = (
+    "unresolved_checked", "recent_rechecked", "provider_events_fetched",
+    "matched_finals", "new_results_recorded", "corrected_results_updated",
+    "not_final_skipped", "unmatched_skipped", "ambiguous_skipped",
+    "incomplete_identity_skipped",
+)
+
+def _empty_sport_summary() -> dict[str, dict[str, int]]:
+    """Return stable zero-filled instrumentation for every supported sport."""
+    return {sport: {counter: 0 for counter in SUMMARY_COUNTERS} for sport in SUPPORTED_SPORTS}
+
+def collect_results(store: HistoryStore, fetcher=fetch_events_for_date, now: datetime | None = None, unresolved_lookback_days: int | None = ROUTINE_LOOKBACK_DAYS) -> dict[str,Any]:
     """Perform one fail-closed settlement run; provider errors intentionally escape."""
     unresolved=store.unresolved_games(now,sports=SUPPORTED_SPORTS,lookback_days=unresolved_lookback_days)
     recent=store.recently_settled_games(now,correction_hours=48,sports=SUPPORTED_SPORTS)
@@ -188,26 +199,42 @@ def collect_results(store: HistoryStore, fetcher=fetch_events_for_date, now: dat
         sport_games=[game for game in planned if game.get("sport")==sport]
         for date in provider_dates_for_games(sport_games): raw_events.extend(fetcher(sport,date))
     events=deduplicate_provider_events(raw_events)
-    summary={"unresolved_checked":len(unresolved),"recent_rechecked":len(recent),"provider_events_fetched":len(events),"matched_finals":0,"new_results_recorded":0,"corrected_results_updated":0,"not_final_skipped":0,"unmatched_skipped":0,"ambiguous_skipped":0,"incomplete_identity_skipped":0}
+    summary={"unresolved_checked":len(unresolved),"recent_rechecked":len(recent),"provider_events_fetched":len(events),"matched_finals":0,"new_results_recorded":0,"corrected_results_updated":0,"not_final_skipped":0,"unmatched_skipped":0,"ambiguous_skipped":0,"incomplete_identity_skipped":0,"by_sport":_empty_sport_summary()}
+    by_sport=summary["by_sport"]
+    for game in unresolved: by_sport[game["sport"]]["unresolved_checked"]+=1
+    for game in recent: by_sport[game["sport"]]["recent_rechecked"]+=1
+    for event in events: by_sport[event["sport"]]["provider_events_fetched"]+=1
     for game, is_recent in [(game,False) for game in unresolved]+[(game,True) for game in recent]:
         match=match_stored_game(game,events); state=match["status"]
         if state!="matched":
             summary[f"{state}_skipped"]+=1
+            by_sport[game["sport"]][f"{state}_skipped"]+=1
             continue
         event=match["event"]
         if event["status"]!="final":
             summary["not_final_skipped"]+=1
+            by_sport[game["sport"]]["not_final_skipped"]+=1
             continue
         summary["matched_finals"]+=1
+        by_sport[game["sport"]]["matched_finals"]+=1
         changed=is_recent and (game["away_score"]!=event["away_score"] or game["home_score"]!=event["home_score"])
         store.record_game_result(game["sport"],game["matchup"],game["event_start_utc"],event["away_score"],event["home_score"],result_source="espn_scoreboard",external_event_id=event["external_event_id"],source_status=event["source_status"])
         if is_recent:
-            if changed: summary["corrected_results_updated"]+=1
+            if changed:
+                summary["corrected_results_updated"]+=1
+                by_sport[game["sport"]]["corrected_results_updated"]+=1
         else: summary["new_results_recorded"]+=1
+        if not is_recent: by_sport[game["sport"]]["new_results_recorded"]+=1
     return summary
 
-def format_summary(summary: dict[str,int]) -> str:
-    return "\n".join((f"Checked {summary['unresolved_checked']} unresolved games.",f"Rechecked {summary['recent_rechecked']} recent results.",f"Fetched {summary['provider_events_fetched']} ESPN events.",f"Matched {summary['matched_finals']} final games.",f"Recorded {summary['new_results_recorded']} new results.",f"Updated {summary['corrected_results_updated']} corrected results.",f"Skipped {summary['not_final_skipped']} not final.",f"Skipped {summary['unmatched_skipped']} unmatched.",f"Skipped {summary['ambiguous_skipped']} ambiguous.",f"Skipped {summary['incomplete_identity_skipped']} incomplete identity."))
+def format_summary(summary: dict[str,Any]) -> str:
+    aggregate=(f"Checked {summary['unresolved_checked']} unresolved games.",f"Rechecked {summary['recent_rechecked']} recent results.",f"Fetched {summary['provider_events_fetched']} ESPN events.",f"Matched {summary['matched_finals']} final games.",f"Recorded {summary['new_results_recorded']} new results.",f"Updated {summary['corrected_results_updated']} corrected results.",f"Skipped {summary['not_final_skipped']} not final.",f"Skipped {summary['unmatched_skipped']} unmatched.",f"Skipped {summary['ambiguous_skipped']} ambiguous.",f"Skipped {summary['incomplete_identity_skipped']} incomplete identity.")
+    by_sport=summary.get("by_sport",_empty_sport_summary())
+    per_sport=["Per-sport settlement:"]
+    for sport in SUPPORTED_SPORTS:
+        counts=by_sport.get(sport,{counter:0 for counter in SUMMARY_COUNTERS})
+        per_sport.append(f"{sport}: unresolved={counts['unresolved_checked']} recent={counts['recent_rechecked']} events={counts['provider_events_fetched']} finals={counts['matched_finals']} new={counts['new_results_recorded']} corrected={counts['corrected_results_updated']} not_final={counts['not_final_skipped']} unmatched={counts['unmatched_skipped']} ambiguous={counts['ambiguous_skipped']} incomplete_identity={counts['incomplete_identity_skipped']}")
+    return "\n".join((*aggregate,*per_sport))
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser=argparse.ArgumentParser(description="Settle Sharp Signal results for all supported scanner sports.")
