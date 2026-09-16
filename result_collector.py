@@ -27,7 +27,15 @@ _RUN_FETCH_CACHE: dict[str, dict[str, Any]] = {}
 ALIASES = {
     "NFL": {"arizonacardinals":"ari","atlantafalcons":"atl","baltimoreravens":"bal","buffalobills":"buf","carolinapanthers":"car","chicagobears":"chi","cincinnatibengals":"cin","clevelandbrowns":"cle","dallascowboys":"dal","denverbroncos":"den","detroitlions":"det","greenbaypackers":"gb","houstontexans":"hou","indianapoliscolts":"ind","jacksonvillejaguars":"jax","kansascitychiefs":"kc","lasvegasraiders":"lv","losangeleschargers":"lac","losangelesrams":"lar","miamidolphins":"mia","minnesotavikings":"min","newenglandpatriots":"ne","neworleanssaints":"no","newyorkgiants":"nyg","newyorkjets":"nyj","philadelphiaeagles":"phi","pittsburghsteelers":"pit","sanfrancisco49ers":"sf","seattleseahawks":"sea","tampabaybuccaneers":"tb","tennesseetitans":"ten","washingtoncommanders":"was"},
     "NCAAF": {"miamifl":"miamifl","miamihurricanes":"miamifl","miamioh":"miamioh","miamiohredhawks":"miamioh"},
-    "NBA": {}, "NCAAB": {}, "MLB": {}, "NHL": {},
+    # Observed ScoresAndOdds codes versus ESPN scoreboard abbreviations.
+    "NBA": {"gsw":"gs", "nop":"no", "nyk":"ny", "sas":"sa", "uta":"utah", "was":"wsh"},
+    "NCAAB": {
+        "ac":"acu", "camp":"cam", "chs":"chst", "csb":"csub", "ind":"iu",
+        "lil":"luc", "mcns":"mcn", "mizz":"miz", "mtu":"mtsu", "murr":"mur",
+        "neom":"oma", "peay":"apsu", "sbon":"sbu", "scus":"upst", "txam":"tam",
+    },
+    "MLB": {"cws":"chw"},
+    "NHL": {"uta":"utah"},
 }
 
 def _identifier(value: Any) -> str: return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
