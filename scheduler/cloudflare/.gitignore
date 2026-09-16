@@ -1,5 +1,5 @@
 node_modules/
 .wrangler/
 .wrangler-dry-run/
-.dev.vars
-.env
+.dev.vars*
+.env*
