@@ -137,14 +137,24 @@ def parse_total(total_str: str) -> Tuple[Optional[float], DataQualityFlags]:
 
 
 def validate_executable_total(executable_line: Optional[str], split_line: Optional[str]) -> Tuple[bool, DataQualityFlags]:
-    """Reject only parsed executable totals that are implausibly far from split."""
+    """Fail closed when an executable Total or its split reference is unusable."""
     flags = DataQualityFlags()
-    executable, _ = parse_total(str(executable_line or ""))
-    split, _ = parse_total("o" + str(split_line or ""))
-    # Existing missing/malformed parsing paths retain their established flags;
-    # this guard only adds an integrity failure when both numbers are available.
-    if executable is None or split is None:
-        return True, flags
+    executable_text = str(executable_line or "").strip()
+    split_text = str(split_line or "").strip()
+    executable, _ = parse_total(executable_text)
+    split, _ = parse_total("o" + split_text)
+    if executable is None:
+        if executable_text.upper() in {"", "N/A"}:
+            flags.missing_total = True
+        else:
+            flags.invalid_total = True
+        return False, flags
+    if split is None:
+        if split_text.upper() in {"", "N/A"}:
+            flags.missing_total = True
+        else:
+            flags.invalid_total = True
+        return False, flags
     if abs(executable - split) > MAX_TOTAL_DEVIATION_FROM_SPLIT:
         flags.invalid_total = True
         return False, flags

@@ -14,6 +14,24 @@ def test_total_sanity_guard_rejects_production_like_corrupt_quote():
     assert not valid and flags.invalid_total
 
 
+@pytest.mark.parametrize("executable", ["garbage", "oXYZ"])
+def test_total_sanity_guard_rejects_nonempty_unparseable_executable(executable):
+    valid, flags = validate_executable_total(executable, "54.5")
+    assert not valid and flags.invalid_total
+
+
+def test_total_sanity_guard_fails_closed_for_unusable_split_reference():
+    valid, flags = validate_executable_total("o53.5", "garbage")
+    assert not valid and flags.invalid_total
+    valid, flags = validate_executable_total("o53.5", None)
+    assert not valid and flags.missing_total and not flags.invalid_total
+
+
+def test_missing_executable_total_is_not_reclassified_as_invalid_source_value():
+    valid, flags = validate_executable_total(None, "54.5")
+    assert not valid and flags.missing_total and not flags.invalid_total
+
+
 @pytest.mark.parametrize("executable,split", [
     ("o53.5", "54.5"), ("u55", "54.5"), ("o46.5", "47.5"),
     ("u9", "8.5"), ("o7", "6.5"), ("u218.5", "220.5"),
@@ -21,6 +39,13 @@ def test_total_sanity_guard_rejects_production_like_corrupt_quote():
 def test_total_sanity_guard_keeps_plausible_totals(executable, split):
     valid, flags = validate_executable_total(executable, split)
     assert valid and not flags.invalid_total
+
+
+def test_total_sanity_guard_allows_exact_threshold_but_rejects_over_threshold():
+    valid, flags = validate_executable_total("o39.5", "54.5")
+    assert valid and not flags.invalid_total
+    valid, flags = validate_executable_total("o39", "54.5")
+    assert not valid and flags.invalid_total
 
 
 def total_html(over_line="o6.5", over_price="-112", under_line="u54.5", under_price="-108"):
@@ -39,6 +64,16 @@ def test_parser_rejects_malformed_total_quote_without_corrupting_opposite_quote(
     over = data.iloc[0]
     under = data.iloc[1]
     assert over["Split line"] == "54.5"
+    assert over["Best line"] == "N/A" and pd.isna(over["Best price"])
+    assert pd.isna(over["Break-even %"]) and over["Line vs split"] == "N/A"
+    assert "invalid total" in over["Data quality"]
+    assert under["Best line"] == "u54.5" and under["Best price"] == -108
+
+
+def test_parser_rejects_unparseable_total_quote_without_corrupting_opposite_quote():
+    data = app.parse_scoresandodds_html(total_html(over_line="garbage"), datetime.now(timezone.utc))
+    over = data.iloc[0]
+    under = data.iloc[1]
     assert over["Best line"] == "N/A" and pd.isna(over["Best price"])
     assert pd.isna(over["Break-even %"]) and over["Line vs split"] == "N/A"
     assert "invalid total" in over["Data quality"]
