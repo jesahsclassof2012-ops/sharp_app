@@ -72,7 +72,7 @@ def test_identity_aliases_do_not_leak_between_sports(sport, source, other_sport)
 @pytest.mark.parametrize("sport,event_id,start,stored_away,stored_home,espn_away,away_name,espn_home,home_name", [
     ("NBA", "401809238", "2025-12-25T17:00:00Z", "CLE", "NYK", "CLE", "Cleveland Cavaliers", "NY", "New York Knicks"),
     ("NCAAB", "401819892", "2025-11-26T01:00:00Z", "KSU", "IND", "KSU", "Kansas State Wildcats", "IU", "Indiana Hoosiers"),
-    ("MLB", "401816945", "2026-09-15T22:40:00Z", "CWS", "CLE", "CHW", "Chicago White Sox", "CLE", "Cleveland Guardians"),
+    ("MLB", "401697324", "2025-09-28T19:05:00Z", "CWS", "WSH", "CHW", "Chicago White Sox", "WSH", "Washington Nationals"),
     ("NHL", "401688896", "2025-04-16T00:00:00Z", "UTA", "STL", "UTAH", "Utah Hockey Club", "STL", "St. Louis Blues"),
 ])
 def test_real_source_to_provider_identity_fixture_matches_end_to_end(
