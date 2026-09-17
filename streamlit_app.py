@@ -33,7 +33,7 @@ from sharp_core import (
     validate_executable_total,
     validate_percentages,
 )
-from history_store import HistoryStore, bucket_performance, performance
+from history_store import HistoryStore, bucket_performance, game_key, performance, signal_key
 
 
 SPORTS = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
@@ -45,12 +45,16 @@ DISPLAY_COLUMNS = [
 ]
 RESULT_TABLE_COLUMNS = [
     "Matchup", "Start time", "Market", "Selection", "Bets %", "Money %",
-    "Money minus Bets gap", "Split line", "Best line", "Best price",
+    "Money minus Bets gap", "Gap Δ 60m", "Split line", "Best line", "Best price",
     "Break-even %", "Line vs split", "Data quality", "Session movement",
 ]
 RESULT_VIEW_OPTIONS = ["Cards", "Table"]
 DEFAULT_RESULTS_VIEW = "Table"
 MIXED_MARKET_CLV_MESSAGE = "Average CLV is not combined across different market types because CLV definitions are market-specific."
+MOVEMENT_WINDOW = timedelta(minutes=60)
+# Snapshots run approximately every 15 minutes; accept normal scheduler drift,
+# but never silently widen this 60-minute comparison beyond ±20 minutes.
+MOVEMENT_TOLERANCE = timedelta(minutes=20)
 
 
 def display_value(value: Any) -> str:
@@ -68,6 +72,37 @@ def format_gap(value: Any) -> str:
     if value is None or pd.isna(value):
         return "N/A"
     return f"{float(value):+g}"
+
+
+def utc_timestamp(value: Any, assume_utc: bool = False) -> Optional[datetime]:
+    """Return an aware UTC timestamp, never comparing naive and aware values."""
+    if value is None or pd.isna(value):
+        return None
+    try:
+        stamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        if not assume_utc:
+            return None
+        stamp = stamp.tz_localize(timezone.utc)
+    return stamp.tz_convert(timezone.utc).to_pydatetime()
+
+
+def format_first_seen(value: Any) -> str:
+    stamp = utc_timestamp(value, assume_utc=True)
+    if stamp is None:
+        return "First seen N/A"
+    local = stamp.astimezone(PACIFIC)
+    return f"First seen {local.strftime('%I').lstrip('0')}:{local.strftime('%M %p')} PT"
+
+
+def movement_card_caption(row: dict[str, Any]) -> str:
+    """Compact persistent split movement; session movement remains secondary."""
+    prior, current, delta = (row.get("Historical gap 60m"), row.get("Money minus Bets gap"), row.get("Gap Δ 60m"))
+    if any(value is None or pd.isna(value) for value in (prior, current, delta)):
+        return "60m movement: N/A"
+    return f"Gap {format_gap(prior)} → {format_gap(current)} ({format_gap(delta)} in ~60m)"
 
 
 def format_price(value: Any) -> str:
@@ -252,6 +287,7 @@ def render_signal_cards(data: pd.DataFrame) -> None:
                 st.metric("Price", format_price(row["Best price"]), width="content")
                 st.metric("Break-even", format_percent(row["Break-even %"], 1), width="content")
             relationship = "" if row["Market"] == "Moneyline" else f"Line vs split: {display_value(row['Line vs split'])} · "
+            st.caption(f"{movement_card_caption(row.to_dict())} · {format_first_seen(row.get('First seen'))}")
             st.caption(f"{relationship}Data quality: {display_value(row['Data quality'])} · Session: {display_value(row['Session movement'])}")
     if shown < len(data):
         if st.button(f"Show more ({len(data) - shown} remaining)", use_container_width=True, key="show_more_cards"):
@@ -491,6 +527,82 @@ def add_session_movement(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
+def live_signal_identity(row: dict[str, Any], sport: str) -> Optional[tuple[str, datetime]]:
+    """Build the existing deterministic signal identity for one current row."""
+    event_start = utc_timestamp(row.get("Start time"))
+    observed = utc_timestamp(row.get("Last refresh time"))
+    if event_start is None or observed is None:
+        return None
+    try:
+        game = game_key(sport, str(row["Matchup"]), event_start)
+        return signal_key(game, str(row["Market"]), str(row["Selection"])), observed
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def add_persistent_movement(data: pd.DataFrame, sport: str, store_factory=HistoryStore) -> pd.DataFrame:
+    """Attach optional, exact-signal movement using two bounded database reads.
+
+    The closest pregame split snapshot to refresh-minus-60-minutes is accepted
+    only within the documented ±20-minute tolerance.  Quote executability is
+    intentionally irrelevant: this is a Money-minus-Bets split metric.
+    """
+    output = data.copy()
+    output["Gap Δ 60m"] = None
+    output["Historical gap 60m"] = None
+    output["First seen"] = None
+    identities = {
+        index: identity
+        for index, row in output.iterrows()
+        if (identity := live_signal_identity(row.to_dict(), sport)) is not None
+    }
+    if not identities or not os.getenv("DATABASE_URL"):
+        return output
+    signal_keys = [identity[0] for identity in identities.values()]
+    observations = [identity[1] for identity in identities.values()]
+    try:
+        # One bounded candidate query plus one grouped MIN query for all rows.
+        store = store_factory(production=True)
+        candidates = store.movement_snapshots(
+            signal_keys,
+            min(observations) - MOVEMENT_WINDOW - MOVEMENT_TOLERANCE,
+            max(observations),
+        )
+        first_seen = store.first_seen_for_signals(signal_keys)
+    except Exception:
+        # Persistent history is optional: production scanner rendering remains
+        # available if DATABASE_URL, PostgreSQL, or these movement reads fail.
+        return output
+    by_signal: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        by_signal.setdefault(candidate["signal_key"], []).append(candidate)
+    for index, (signal, current_at) in identities.items():
+        first = utc_timestamp(first_seen.get(signal), assume_utc=True)
+        if first is not None and first <= current_at:
+            output.at[index, "First seen"] = first
+        current_gap = output.at[index, "Money minus Bets gap"]
+        if current_gap is None or pd.isna(current_gap):
+            continue
+        target = current_at - MOVEMENT_WINDOW
+        eligible = []
+        for candidate in by_signal.get(signal, []):
+            observed = utc_timestamp(candidate.get("observed_at_utc"), assume_utc=True)
+            event_start = utc_timestamp(candidate.get("event_start_utc"), assume_utc=True)
+            gap = candidate.get("money_minus_bets_gap")
+            if observed is None or event_start is None or observed >= current_at or observed >= event_start or gap is None or pd.isna(gap):
+                continue
+            distance = abs(observed - target)
+            if distance <= MOVEMENT_TOLERANCE:
+                eligible.append((distance, observed, candidate))
+        if not eligible:
+            continue
+        _, _, prior = min(eligible, key=lambda item: (item[0], item[1]))
+        prior_gap = prior["money_minus_bets_gap"]
+        output.at[index, "Historical gap 60m"] = prior_gap
+        output.at[index, "Gap Δ 60m"] = float(current_gap) - float(prior_gap)
+    return output
+
+
 def render_history() -> None:
     """Persistent-history view; conclusions stay descriptive at small samples."""
     st.divider()
@@ -592,7 +704,8 @@ def main() -> None:
     data = data[data["Start time"].isna() | ((data["Start time"] >= now) & (data["Start time"] <= now + timedelta(hours=hours)))]
     if require_price:
         data = data[data["Best price"].notna()]
-    data = add_session_movement(data).sort_values(["Start time", "Money minus Bets gap"], ascending=[True, False])
+    data = add_session_movement(data)
+    data = add_persistent_movement(data, sport).sort_values(["Start time", "Money minus Bets gap"], ascending=[True, False])
     signature = card_filter_signature(sport, market, min_gap, max_tickets, max_money, hours, require_price)
     if st.session_state.get("sharp_cards_filter_signature") != signature:
         st.session_state["sharp_cards_filter_signature"] = signature
@@ -608,8 +721,10 @@ def main() -> None:
     if view == "Cards":
         render_signal_cards(data)
     else:
-        st.caption("Session movement compares this browser session only; it is not persistent historical backtesting.")
-        st.dataframe(data[RESULT_TABLE_COLUMNS], use_container_width=True, hide_index=True, column_config={
+        st.caption("Gap Δ 60m uses exact-signal pregame snapshots closest to 60 minutes before the fetched refresh time; session movement remains browser-only.")
+        table = data[RESULT_TABLE_COLUMNS].copy()
+        table["Gap Δ 60m"] = table["Gap Δ 60m"].map(format_gap)
+        st.dataframe(table, use_container_width=True, hide_index=True, column_config={
             "Start time": st.column_config.DatetimeColumn(format="MMM D, h:mm a"),
             "Bets %": st.column_config.NumberColumn(format="%.0f%%"),
             "Money %": st.column_config.NumberColumn(format="%.0f%%"),
