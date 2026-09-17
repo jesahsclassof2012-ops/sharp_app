@@ -141,6 +141,7 @@ def test_fetch_data_cache_keeps_actual_fetch_timestamp(monkeypatch):
 def test_history_ui_without_database_url_warns_without_sqlite(monkeypatch):
     messages = []
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setitem(streamlit_app.st.session_state, streamlit_app.HISTORY_LOADED_KEY, True)
     monkeypatch.setattr(streamlit_app.st, "divider", lambda: None)
     monkeypatch.setattr(streamlit_app.st, "header", lambda *args, **kwargs: None)
     monkeypatch.setattr(streamlit_app.st, "warning", messages.append)
