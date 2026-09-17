@@ -74,6 +74,14 @@ def format_gap(value: Any) -> str:
     return f"{float(value):+g}"
 
 
+def format_movement_gap(value: Any) -> str:
+    """Format persistent movement without presenting zero as a positive value."""
+    if value is None or pd.isna(value):
+        return "N/A"
+    numeric = float(value)
+    return "0" if numeric == 0 else f"{numeric:+g}"
+
+
 def utc_timestamp(value: Any, assume_utc: bool = False) -> Optional[datetime]:
     """Return an aware UTC timestamp, never comparing naive and aware values."""
     if value is None or pd.isna(value):
@@ -102,7 +110,7 @@ def movement_card_caption(row: dict[str, Any]) -> str:
     prior, current, delta = (row.get("Historical gap 60m"), row.get("Money minus Bets gap"), row.get("Gap Δ 60m"))
     if any(value is None or pd.isna(value) for value in (prior, current, delta)):
         return "60m movement: N/A"
-    return f"Gap {format_gap(prior)} → {format_gap(current)} ({format_gap(delta)} in ~60m)"
+    return f"Gap {format_gap(prior)} → {format_gap(current)} ({format_movement_gap(delta)} in ~60m)"
 
 
 def format_price(value: Any) -> str:
@@ -603,6 +611,12 @@ def add_persistent_movement(data: pd.DataFrame, sport: str, store_factory=Histor
     return output
 
 
+def results_table_for_display(data: pd.DataFrame):
+    """Apply presentation-only movement formatting without changing numeric data."""
+    table = data[RESULT_TABLE_COLUMNS].copy()
+    return table.style.format({"Gap Δ 60m": format_movement_gap}, na_rep="N/A")
+
+
 def render_history() -> None:
     """Persistent-history view; conclusions stay descriptive at small samples."""
     st.divider()
@@ -722,9 +736,7 @@ def main() -> None:
         render_signal_cards(data)
     else:
         st.caption("Gap Δ 60m uses exact-signal pregame snapshots closest to 60 minutes before the fetched refresh time; session movement remains browser-only.")
-        table = data[RESULT_TABLE_COLUMNS].copy()
-        table["Gap Δ 60m"] = table["Gap Δ 60m"].map(format_gap)
-        st.dataframe(table, use_container_width=True, hide_index=True, column_config={
+        st.dataframe(results_table_for_display(data), use_container_width=True, hide_index=True, column_config={
             "Start time": st.column_config.DatetimeColumn(format="MMM D, h:mm a"),
             "Bets %": st.column_config.NumberColumn(format="%.0f%%"),
             "Money %": st.column_config.NumberColumn(format="%.0f%%"),

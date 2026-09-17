@@ -133,6 +133,7 @@ def test_first_seen_and_cards_format_pacific_time(monkeypatch):
     data, _ = enriched(monkeypatch, store, [live_row()])
     assert app.format_first_seen(data.loc[0, "First seen"]) == "First seen 2:15 AM PT"
     assert app.movement_card_caption(data.loc[0].to_dict()) == "Gap +18 → +31 (+13 in ~60m)"
+    assert app.movement_card_caption({"Historical gap 60m": 31, "Money minus Bets gap": 31, "Gap Δ 60m": 0}) == "Gap +31 → +31 (0 in ~60m)"
     assert app.movement_card_caption({"Historical gap 60m": None, "Money minus Bets gap": 31, "Gap Δ 60m": None}) == "60m movement: N/A"
 
 
@@ -158,3 +159,23 @@ def test_table_only_adds_one_persistent_movement_column_and_keeps_session_second
     assert "Gap Δ 60m" in app.RESULT_TABLE_COLUMNS
     assert {"Money Δ 60m", "Bets Δ 60m", "Line movement", "Price movement", "First seen"}.isdisjoint(app.RESULT_TABLE_COLUMNS)
     assert "Session movement" in app.RESULT_TABLE_COLUMNS
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(13, "+13"), (-8, "-8"), (0, "0"), (None, "N/A")],
+)
+def test_movement_gap_formatting_is_signed_without_positive_zero(value, expected):
+    assert app.format_movement_gap(value) == expected
+
+
+def test_results_table_preserves_numeric_movement_values_while_formatting_display():
+    records = []
+    for movement in (13.0, -8.0, 0.0, None):
+        row = {column: None for column in app.RESULT_TABLE_COLUMNS}
+        row.update({"Matchup": "DEN vs KC", "Gap Δ 60m": movement})
+        records.append(row)
+    styled = app.results_table_for_display(pd.DataFrame(records))
+    assert pd.api.types.is_numeric_dtype(styled.data["Gap Δ 60m"])
+    rendered = styled.to_html()
+    assert "+13" in rendered and "-8" in rendered and ">0<" in rendered and "N/A" in rendered
