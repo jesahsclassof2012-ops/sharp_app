@@ -137,4 +137,5 @@ def test_requested_history_failure_is_isolated(monkeypatch):
     app.render_history()
 
     assert fake_st.session_state[app.HISTORY_LOADED_KEY] is True
-    assert fake_st.warnings == ["History unavailable: could not load (history query unavailable)."]
+    assert fake_st.warnings == ["History is temporarily unavailable."]
+    assert "history query unavailable" not in fake_st.warnings[0]

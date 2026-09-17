@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import csv
 import io
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -34,6 +35,9 @@ from sharp_core import (
     validate_percentages,
 )
 from history_store import HistoryStore, bucket_performance, game_key, performance, signal_key
+
+
+logger = logging.getLogger(__name__)
 
 
 SPORTS = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
@@ -663,8 +667,9 @@ def render_history() -> None:
             filtered_rows = rows if selected_sport == "All sports" else [row for row in rows if row.get("sport") == selected_sport]
             metrics = performance(filtered_rows)
             stored_observations = store.snapshot_count(None if selected_sport == "All sports" else selected_sport)
-        except Exception as exc:
-            st.warning(f"History unavailable: could not load ({exc}).")
+        except Exception:
+            logger.exception("History failed to load")
+            st.warning("History is temporarily unavailable.")
             return
         st.caption("Persistent database history. Small samples are not evidence of a profitable strategy.")
         with st.expander("Methodology", expanded=False):
