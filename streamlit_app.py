@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import csv
 import io
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -36,6 +37,9 @@ from sharp_core import (
 from history_store import HistoryStore, bucket_performance, game_key, performance, signal_key
 
 
+logger = logging.getLogger(__name__)
+
+
 SPORTS = ["NBA", "NFL", "NHL", "MLB", "NCAAF", "NCAAB"]
 PACIFIC = pytz.timezone("America/Los_Angeles")
 DISPLAY_COLUMNS = [
@@ -49,6 +53,7 @@ RESULT_TABLE_COLUMNS = [
     "Break-even %", "Line vs split", "Data quality", "Session movement",
 ]
 RESULT_VIEW_OPTIONS = ["Cards", "Table"]
+HISTORY_LOADED_KEY = "history_loaded"
 DEFAULT_RESULTS_VIEW = "Table"
 MIXED_MARKET_CLV_MESSAGE = "Average CLV is not combined across different market types because CLV definitions are market-specific."
 MOVEMENT_WINDOW = timedelta(minutes=60)
@@ -634,30 +639,38 @@ def results_table_for_display(data: pd.DataFrame):
 
 
 def render_history() -> None:
-    """Persistent-history view; conclusions stay descriptive at small samples."""
+    """Render persistent history only after the user explicitly requests it."""
     st.divider()
-    with st.expander("History / Performance", expanded=False):
+    history_loaded = bool(st.session_state.get(HISTORY_LOADED_KEY, False))
+    if not history_loaded:
+        if st.button("Load History & Performance", key="load_history"):
+            st.session_state[HISTORY_LOADED_KEY] = True
+            history_loaded = True
+        else:
+            return
+    with st.expander("History / Performance", expanded=history_loaded):
         if not os.getenv("DATABASE_URL"):
             st.warning("History unavailable: configure DATABASE_URL.")
             return
         try:
             store = HistoryStore(production=True)
-        except Exception as exc:
-            st.warning(f"History unavailable: database connection failed ({exc}).")
+            rows = store.analytics_rows()
+            # Normal History rendering needs only database-side sport/count helpers.
+            # Snapshot rows are intentionally materialized later only for the
+            # existing CSV export controls.
+            sports = sorted({*store.history_sports(), *(str(row["sport"]) for row in rows if row.get("sport"))})
+            options = ["All sports", *sports]
+            current = st.session_state.get("history_sport", "All sports")
+            if current not in options:
+                st.session_state["history_sport"] = "All sports"
+            selected_sport = st.selectbox("History sport", options, key="history_sport")
+            filtered_rows = rows if selected_sport == "All sports" else [row for row in rows if row.get("sport") == selected_sport]
+            metrics = performance(filtered_rows)
+            stored_observations = store.snapshot_count(None if selected_sport == "All sports" else selected_sport)
+        except Exception:
+            logger.exception("History failed to load")
+            st.warning("History is temporarily unavailable.")
             return
-        rows = store.analytics_rows()
-        # Normal History rendering needs only database-side sport/count helpers.
-        # Snapshot rows are intentionally materialized later only for the
-        # existing CSV export controls.
-        sports = sorted({*store.history_sports(), *(str(row["sport"]) for row in rows if row.get("sport"))})
-        options = ["All sports", *sports]
-        current = st.session_state.get("history_sport", "All sports")
-        if current not in options:
-            st.session_state["history_sport"] = "All sports"
-        selected_sport = st.selectbox("History sport", options, key="history_sport")
-        filtered_rows = rows if selected_sport == "All sports" else [row for row in rows if row.get("sport") == selected_sport]
-        metrics = performance(filtered_rows)
-        stored_observations = store.snapshot_count(None if selected_sport == "All sports" else selected_sport)
         st.caption("Persistent database history. Small samples are not evidence of a profitable strategy.")
         with st.expander("Methodology", expanded=False):
             st.markdown("""**Baseline entry:** earliest snapshot for a signal with a valid pregame timestamp, `Data quality = OK`, an executable best price, a valid Spread/Total line where required, and `Money % − Bets % > 0`.
