@@ -29,7 +29,9 @@ def live_row(**changes):
         "Matchup": "DEN vs KC", "Start time": START, "Market": "Spread",
         "Selection": "DEN", "Selection side": "away", "Bets %": 40,
         "Money %": 71, "Money minus Bets gap": 31, "Best line": "+3",
-        "Best price": -110, "Last refresh time": CURRENT,
+        "Best price": -110, "Split line": "+3 / -3", "Break-even %": 52.38,
+        "Line vs split": "Same (+0)", "Data quality": "OK",
+        "Session movement": "New this session", "Last refresh time": CURRENT,
     }
     row.update(changes)
     return row
@@ -89,6 +91,9 @@ def test_exact_signal_identity_is_deterministic_and_does_not_leak_history(monkey
     ])
     data, counting = enriched(monkeypatch, store, [live_row(), live_row(Selection="KC", **{"Selection side": "home"})])
     assert list(data["Gap Δ 60m"]) == [13.0, -68.0]
+    assert pd.api.types.is_numeric_dtype(data["Gap Δ 60m"])
+    assert pd.api.types.is_numeric_dtype(data["Historical gap 60m"])
+    assert list(data["Historical gap 60m"]) == [18.0, 99.0]
     assert app.format_first_seen(data.loc[0, "First seen"]) == "First seen 3:30 AM PT"
     assert counting.movement_calls == counting.first_seen_calls == 1
 
@@ -150,9 +155,13 @@ def test_missing_database_or_query_failure_degrades_to_na_without_sqlite(monkeyp
     monkeypatch.delenv("DATABASE_URL", raising=False)
     data = app.add_persistent_movement(pd.DataFrame([live_row()]), "NFL", store_factory=lambda **_: (_ for _ in ()).throw(AssertionError("must not open SQLite")))
     assert pd.isna(data.loc[0, "Gap Δ 60m"]) and pd.isna(data.loc[0, "First seen"])
+    assert pd.api.types.is_numeric_dtype(data["Gap Δ 60m"])
+    assert pd.api.types.is_numeric_dtype(data["Historical gap 60m"])
     monkeypatch.setenv("DATABASE_URL", "postgresql://configured")
     data = app.add_persistent_movement(pd.DataFrame([live_row()]), "NFL", store_factory=lambda **_: (_ for _ in ()).throw(RuntimeError("database unavailable")))
     assert pd.isna(data.loc[0, "Gap Δ 60m"]) and pd.isna(data.loc[0, "First seen"])
+    assert pd.api.types.is_numeric_dtype(data["Gap Δ 60m"])
+    assert pd.api.types.is_numeric_dtype(data["Historical gap 60m"])
 
 
 def test_table_only_adds_one_persistent_movement_column_and_keeps_session_secondary():
@@ -169,13 +178,23 @@ def test_movement_gap_formatting_is_signed_without_positive_zero(value, expected
     assert app.format_movement_gap(value) == expected
 
 
-def test_results_table_preserves_numeric_movement_values_while_formatting_display():
-    records = []
-    for movement in (13.0, -8.0, 0.0, None):
-        row = {column: None for column in app.RESULT_TABLE_COLUMNS}
-        row.update({"Matchup": "DEN vs KC", "Gap Δ 60m": movement})
-        records.append(row)
-    styled = app.results_table_for_display(pd.DataFrame(records))
+def test_results_table_preserves_real_movement_output_while_formatting_display(monkeypatch):
+    store = HistoryStore("sqlite:///:memory:")
+    store.insert_snapshots([
+        snapshot(selection="DEN", money_minus_bets_gap=18),
+        snapshot(selection="KC", selection_side="home", money_minus_bets_gap=39),
+        snapshot(selection="BUF", money_minus_bets_gap=31),
+    ])
+    data, _ = enriched(monkeypatch, store, [
+        live_row(Selection="DEN"),
+        live_row(Selection="KC", **{"Selection side": "home"}),
+        live_row(Selection="BUF"),
+        live_row(Selection="NYJ"),
+    ])
+    assert list(data["Gap Δ 60m"][:3]) == [13.0, -8.0, 0.0]
+    assert pd.isna(data.loc[3, "Gap Δ 60m"])
+    assert pd.api.types.is_numeric_dtype(data["Historical gap 60m"])
+    styled = app.results_table_for_display(data)
     assert pd.api.types.is_numeric_dtype(styled.data["Gap Δ 60m"])
     rendered = styled.to_html()
     assert "+13" in rendered and "-8" in rendered and ">0<" in rendered and "N/A" in rendered

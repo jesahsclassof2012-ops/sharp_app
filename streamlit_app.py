@@ -556,8 +556,8 @@ def add_persistent_movement(data: pd.DataFrame, sport: str, store_factory=Histor
     intentionally irrelevant: this is a Money-minus-Bets split metric.
     """
     output = data.copy()
-    output["Gap Δ 60m"] = None
-    output["Historical gap 60m"] = None
+    output["Gap Δ 60m"] = pd.Series(pd.NA, index=output.index, dtype="Float64")
+    output["Historical gap 60m"] = pd.Series(pd.NA, index=output.index, dtype="Float64")
     output["First seen"] = None
     identities = {
         index: identity
