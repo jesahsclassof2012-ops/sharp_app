@@ -157,6 +157,9 @@ class HistoryStore:
     def initialize(self) -> None:
         ident = "BIGSERIAL PRIMARY KEY" if self.is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
         self.execute(f"CREATE TABLE IF NOT EXISTS snapshots (id {ident}, game_key TEXT NOT NULL, signal_key TEXT NOT NULL, observed_at_utc TEXT NOT NULL, sport TEXT NOT NULL, matchup TEXT NOT NULL, event_start_utc TEXT NOT NULL, market TEXT NOT NULL, selection TEXT NOT NULL, selection_side TEXT, split_line TEXT, bets_pct REAL, money_pct REAL, money_minus_bets_gap REAL, best_line TEXT, best_price INTEGER, break_even_pct REAL, data_quality TEXT, line_vs_split TEXT, UNIQUE(signal_key,observed_at_utc))")
+        # The live board reads bounded historical windows for many exact signals
+        # at once.  This remains safe to run on existing SQLite/PostgreSQL data.
+        self.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_signal_observed ON snapshots(signal_key, observed_at_utc)")
         self.execute(f"CREATE TABLE IF NOT EXISTS results (id {ident}, game_key TEXT NOT NULL UNIQUE, sport TEXT NOT NULL, matchup TEXT NOT NULL, event_start_utc TEXT NOT NULL, away_score INTEGER NOT NULL, home_score INTEGER NOT NULL, settled_at_utc TEXT NOT NULL)")
         self.ensure_result_provenance_columns()
         self.connection.commit()
@@ -192,6 +195,41 @@ class HistoryStore:
         self.execute(f"INSERT INTO results (game_key,sport,matchup,event_start_utc,away_score,home_score,settled_at_utc,result_source,external_event_id,source_status,result_fetched_at_utc) VALUES ({','.join([self.p]*11)}) ON CONFLICT(game_key) DO UPDATE SET away_score=excluded.away_score,home_score=excluded.home_score,result_source=COALESCE(excluded.result_source,results.result_source),external_event_id=COALESCE(excluded.external_event_id,results.external_event_id),source_status=COALESCE(excluded.source_status,results.source_status),result_fetched_at_utc=excluded.result_fetched_at_utc",(game,sport,matchup,start,away_score,home_score,settled,result_source,external_event_id,source_status,fetched_at)); self.connection.commit()
     def snapshots(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM snapshots ORDER BY observed_at_utc"))
     def results(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM results"))
+
+    def movement_snapshots(self, signal_keys: Iterable[str], lower_bound: Any, upper_bound: Any) -> list[dict[str, Any]]:
+        """Return bounded, pregame split candidates for many exact signals.
+
+        Callers choose the final row per live signal.  Keeping this to one
+        parameterized query avoids both full-table history reads and N+1 calls.
+        """
+        keys = tuple(dict.fromkeys(signal_keys))
+        if not keys:
+            return []
+        lower, upper = normalize_utc(lower_bound), normalize_utc(upper_bound)
+        observed = self._timestamp_sql("observed_at_utc")
+        start = self._timestamp_sql("event_start_utc")
+        sql = f"""SELECT signal_key, observed_at_utc, event_start_utc, money_minus_bets_gap
+            FROM snapshots
+            WHERE signal_key IN ({','.join([self.p] * len(keys))})
+              AND {observed} >= {self._timestamp_sql(self.p)}
+              AND {observed} <= {self._timestamp_sql(self.p)}
+              AND {observed} < {start}
+            ORDER BY signal_key, observed_at_utc"""
+        return self.rows(self.execute(sql, (*keys, lower, upper)))
+
+    def first_seen_for_signals(self, signal_keys: Iterable[str]) -> dict[str, Any]:
+        """Return the earliest stored pregame observation for each exact signal."""
+        keys = tuple(dict.fromkeys(signal_keys))
+        if not keys:
+            return {}
+        observed = self._timestamp_sql("observed_at_utc")
+        start = self._timestamp_sql("event_start_utc")
+        sql = f"""SELECT signal_key, MIN({observed}) AS first_seen_utc
+            FROM snapshots
+            WHERE signal_key IN ({','.join([self.p] * len(keys))})
+              AND {observed} < {start}
+            GROUP BY signal_key"""
+        return {row["signal_key"]: row["first_seen_utc"] for row in self.rows(self.execute(sql, keys))}
     def unresolved_games(self, now=None, sports: Optional[Iterable[str]]=None, lookback_days: Optional[int]=None) -> list[dict[str,Any]]:
         boundary=normalize_utc(now or datetime.now(timezone.utc)); values=[]; conditions=["r.game_key IS NULL",f"{self._timestamp_sql('s.event_start_utc')} < {self._timestamp_sql(self.p)}"]
         values.append(boundary)
