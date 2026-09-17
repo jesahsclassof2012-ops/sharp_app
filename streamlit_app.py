@@ -204,6 +204,22 @@ def history_export_filename(prefix: str, sport: str) -> str:
     return f"{prefix}_{suffix}.csv"
 
 
+def history_csv(records: list[dict[str, Any]]) -> str:
+    """Serialize existing history records without changing export fields."""
+    output = io.StringIO()
+    if records:
+        writer = csv.DictWriter(output, fieldnames=sorted({key for row in records for key in row}))
+        writer.writeheader()
+        writer.writerows(records)
+    return output.getvalue()
+
+
+def snapshot_export_data(store: HistoryStore, sport: str):
+    """Defer the potentially large snapshot read until a CSV is requested."""
+    scope = None if sport == "All sports" else sport
+    return lambda: history_csv(store.snapshots(scope))
+
+
 def insufficient_sample_message(sport: str) -> str:
     qualifier = "" if sport == "All sports" else f" {sport}"
     return f"Insufficient{qualifier} sample size: fewer than 30 settled observations."
@@ -629,15 +645,19 @@ def render_history() -> None:
         except Exception as exc:
             st.warning(f"History unavailable: database connection failed ({exc}).")
             return
-        snapshots = store.snapshots()
         rows = store.analytics_rows()
-        sports = history_sports(snapshots, rows)
+        # Normal History rendering needs only database-side sport/count helpers.
+        # Snapshot rows are intentionally materialized later only for the
+        # existing CSV export controls.
+        sports = sorted({*store.history_sports(), *(str(row["sport"]) for row in rows if row.get("sport"))})
         options = ["All sports", *sports]
         current = st.session_state.get("history_sport", "All sports")
         if current not in options:
             st.session_state["history_sport"] = "All sports"
         selected_sport = st.selectbox("History sport", options, key="history_sport")
-        filtered_snapshots, filtered_rows, metrics = history_scope_metrics(snapshots, rows, selected_sport)
+        filtered_rows = rows if selected_sport == "All sports" else [row for row in rows if row.get("sport") == selected_sport]
+        metrics = performance(filtered_rows)
+        stored_observations = store.snapshot_count(None if selected_sport == "All sports" else selected_sport)
         st.caption("Persistent database history. Small samples are not evidence of a profitable strategy.")
         with st.expander("Methodology", expanded=False):
             st.markdown("""**Baseline entry:** earliest snapshot for a signal with a valid pregame timestamp, `Data quality = OK`, an executable best price, a valid Spread/Total line where required, and `Money % − Bets % > 0`.
@@ -647,7 +667,7 @@ def render_history() -> None:
 **ROI:** one unit is risked per settled baseline signal. A win uses the captured American entry price; loss is −1 unit; push is 0 net units. Pushes remain in the ROI denominator and are excluded from the win-rate denominator.
 
 **CLV:** positive means the baseline entry was bettor-favorable versus that captured pregame close. CLV is not evidence of predictive value or profitability.""")
-        metric_items = history_metric_items(len(filtered_snapshots), metrics)
+        metric_items = history_metric_items(stored_observations, metrics)
         with st.container(horizontal=True, wrap=True, gap="small"):
             for label, value in metric_items:
                 if label in {"Win rate", "ROI", "Positive CLV rate"}:
@@ -676,13 +696,10 @@ def render_history() -> None:
                 "Event start": st.column_config.DatetimeColumn(format="MMM D, h:mm a"),
             })
         with st.expander("Exports", expanded=False):
-            for label, records, prefix in (("Export snapshots CSV", filtered_snapshots, "snapshots"), ("Export settled results CSV", filtered_rows, "settled_results")):
-                output = io.StringIO()
-                if records:
-                    writer = csv.DictWriter(output, fieldnames=sorted({key for row in records for key in row}))
-                    writer.writeheader()
-                    writer.writerows(records)
-                st.download_button(label, output.getvalue(), file_name=history_export_filename(prefix, selected_sport), mime="text/csv", use_container_width=True)
+            # Streamlit supports deferred download data, so the potentially
+            # large snapshot export is read only when it is requested.
+            st.download_button("Export snapshots CSV", snapshot_export_data(store, selected_sport), file_name=history_export_filename("snapshots", selected_sport), mime="text/csv", use_container_width=True)
+            st.download_button("Export settled results CSV", history_csv(filtered_rows), file_name=history_export_filename("settled_results", selected_sport), mime="text/csv", use_container_width=True)
 
 
 def main() -> None:

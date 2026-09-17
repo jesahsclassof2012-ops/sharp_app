@@ -119,6 +119,10 @@ def executable_pregame(row: dict[str, Any]) -> bool:
 
 
 class HistoryStore:
+    # SQLite has a conservative bound on SQL parameters.  Chunking exact keys
+    # retains bounded query behavior without falling back to one query/signal.
+    SIGNAL_QUERY_CHUNK_SIZE = 500
+
     def __init__(self, database_url: Optional[str] = None, production: bool = False):
         self.database_url = database_url or os.getenv("DATABASE_URL")
         self.is_postgres = bool(self.database_url and self.database_url.startswith(("postgres://", "postgresql://")))
@@ -193,8 +197,71 @@ class HistoryStore:
         start=normalize_utc(event_start_utc); game=game_key(sport,matchup,start)
         fetched_at=normalize_utc(datetime.now(timezone.utc)); settled=normalize_utc(settled_at_utc or fetched_at)
         self.execute(f"INSERT INTO results (game_key,sport,matchup,event_start_utc,away_score,home_score,settled_at_utc,result_source,external_event_id,source_status,result_fetched_at_utc) VALUES ({','.join([self.p]*11)}) ON CONFLICT(game_key) DO UPDATE SET away_score=excluded.away_score,home_score=excluded.home_score,result_source=COALESCE(excluded.result_source,results.result_source),external_event_id=COALESCE(excluded.external_event_id,results.external_event_id),source_status=COALESCE(excluded.source_status,results.source_status),result_fetched_at_utc=excluded.result_fetched_at_utc",(game,sport,matchup,start,away_score,home_score,settled,result_source,external_event_id,source_status,fetched_at)); self.connection.commit()
-    def snapshots(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM snapshots ORDER BY observed_at_utc"))
+    def snapshots(self, sport: Optional[str] = None) -> list[dict[str,Any]]:
+        """Return snapshots for exports and legacy callers, optionally sport-scoped."""
+        if sport is None:
+            return self.rows(self.execute("SELECT * FROM snapshots ORDER BY observed_at_utc"))
+        return self.rows(self.execute(f"SELECT * FROM snapshots WHERE sport={self.p} ORDER BY observed_at_utc", (sport,)))
+
     def results(self) -> list[dict[str,Any]]: return self.rows(self.execute("SELECT * FROM results"))
+
+    def snapshot_count(self, sport: Optional[str] = None) -> int:
+        """Count stored observations without materializing snapshot export rows."""
+        if sport is None:
+            row = self.rows(self.execute("SELECT COUNT(*) AS snapshot_count FROM snapshots"))[0]
+        else:
+            row = self.rows(self.execute(f"SELECT COUNT(*) AS snapshot_count FROM snapshots WHERE sport={self.p}", (sport,)))[0]
+        return int(row["snapshot_count"])
+
+    def history_sports(self) -> list[str]:
+        """Return stored sport values without reading the whole snapshots table."""
+        return [row["sport"] for row in self.rows(self.execute("SELECT DISTINCT sport FROM snapshots WHERE sport IS NOT NULL ORDER BY sport"))]
+
+    def _rows_for_exact_keys(self, table: str, key_column: str, keys: Iterable[str], columns: str, where: str = "", values: Iterable[Any] = ()) -> list[dict[str, Any]]:
+        """Read exact-key rows in safe batches for both SQLite and PostgreSQL."""
+        unique_keys = tuple(dict.fromkeys(keys))
+        if not unique_keys:
+            return []
+        output: list[dict[str, Any]] = []
+        for offset in range(0, len(unique_keys), self.SIGNAL_QUERY_CHUNK_SIZE):
+            chunk = unique_keys[offset:offset + self.SIGNAL_QUERY_CHUNK_SIZE]
+            conditions = [f"{key_column} IN ({','.join([self.p] * len(chunk))})"]
+            if where:
+                conditions.append(where)
+            sql = f"SELECT {columns} FROM {table} WHERE {' AND '.join(conditions)}"
+            output.extend(self.rows(self.execute(sql, (*chunk, *values))))
+        return output
+
+    def _baseline_candidates(self) -> list[dict[str, Any]]:
+        """Fetch only unambiguous baseline candidates; Python keeps line validation exact."""
+        observed = self._timestamp_sql("observed_at_utc")
+        start = self._timestamp_sql("event_start_utc")
+        sql = f"""SELECT * FROM snapshots
+            WHERE {observed} < {start}
+              AND data_quality='OK'
+              AND best_price IS NOT NULL
+              AND money_minus_bets_gap > 0
+            ORDER BY observed_at_utc, signal_key"""
+        return self.rows(self.execute(sql))
+
+    def _closing_candidates(self, signal_keys: Iterable[str]) -> list[dict[str, Any]]:
+        """Fetch narrowed closing candidates for many exact baseline signals at once."""
+        observed = self._timestamp_sql("observed_at_utc")
+        start = self._timestamp_sql("event_start_utc")
+        rows = self._rows_for_exact_keys(
+            "snapshots", "signal_key", signal_keys,
+            "signal_key,observed_at_utc,event_start_utc,market,data_quality,best_line,best_price",
+            f"{observed} < {start} AND data_quality='OK' AND best_price IS NOT NULL",
+        )
+        return sorted(rows, key=lambda row: (str(row["signal_key"]), str(row["observed_at_utc"])))
+
+    def _results_for_games(self, game_keys: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Return result evidence for the exact games represented by baseline entries."""
+        rows = self._rows_for_exact_keys(
+            "results", "game_key", game_keys,
+            "game_key,away_score,home_score,result_source,external_event_id,source_status,settled_at_utc,result_fetched_at_utc",
+        )
+        return {row["game_key"]: row for row in rows}
 
     def movement_snapshots(self, signal_keys: Iterable[str], lower_bound: Any, upper_bound: Any) -> list[dict[str, Any]]:
         """Return bounded, pregame split candidates for many exact signals.
@@ -281,11 +348,29 @@ class HistoryStore:
             if baseline_eligible(row): groups.setdefault(row["signal_key"],[]).append(row)
         return [min(rows,key=lambda x:x["observed_at_utc"]) for rows in groups.values()]
     def analytics_rows(self) -> list[dict[str,Any]]:
-        scores={row["game_key"]:row for row in self.results()}; output=[]
-        for entry in self.baseline_entries():
+        # The legacy helpers above intentionally remain available to callers,
+        # but analytics uses bounded, batched reads: candidates, results, and
+        # exact-signal closing candidates.  It must never rescan snapshots per
+        # settled entry.
+        grouped: dict[str, dict[str, Any]] = {}
+        for candidate in self._baseline_candidates():
+            if baseline_eligible(candidate):
+                grouped.setdefault(candidate["signal_key"], candidate)
+        entries = list(grouped.values())
+        scores = self._results_for_games(entry["game_key"] for entry in entries)
+        entries = [entry for entry in entries if entry["game_key"] in scores]
+        close_candidates: dict[str, list[dict[str, Any]]] = {}
+        for candidate in self._closing_candidates(entry["signal_key"] for entry in entries):
+            if executable_pregame(candidate):
+                close_candidates.setdefault(candidate["signal_key"], []).append(candidate)
+        closes = {
+            signal: max(candidates, key=lambda candidate: candidate["observed_at_utc"])
+            for signal, candidates in close_candidates.items()
+        }
+        output=[]
+        for entry in entries:
             result=scores.get(entry["game_key"])
-            if not result: continue
-            close=self.first_current_close(entry["signal_key"])["close"]
+            close=closes.get(entry["signal_key"])
             row=dict(entry)
             row.update({key: result.get(key) for key in (
                 "away_score", "home_score", "result_source", "external_event_id",
