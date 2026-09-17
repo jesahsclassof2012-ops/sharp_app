@@ -50,10 +50,14 @@ def validated_no_vig_pair(side: dict[str, Any], opposite: dict[str, Any], *, max
     This intentionally cannot make current production snapshots no-vig: their
     schema has no book/source or paired opposite-price provenance.
     """
-    required = ("market", "source", "observed_at_utc", "best_price", "line")
+    required = ("game_key", "market", "source", "observed_at_utc", "best_price", "line", "selection")
     if any(side.get(field) is None or opposite.get(field) is None for field in required):
         return None
+    if side["game_key"] != opposite["game_key"]:
+        return None
     if side["market"] != opposite["market"] or side["source"] != opposite["source"]:
+        return None
+    if not _opposite_selections(side["market"], side["selection"], opposite["selection"]):
         return None
     if not _paired_lines_compatible(side["market"], side["line"], opposite["line"]):
         return None
@@ -62,6 +66,19 @@ def validated_no_vig_pair(side: dict[str, Any], opposite: dict[str, Any], *, max
     except (TypeError, ValueError):
         return None
     return no_vig_probability(side["best_price"], opposite["best_price"], same_source=True, same_line=True, synchronized=synchronized)
+
+
+def _opposite_selections(market: str, side_selection: Any, opposite_selection: Any) -> bool:
+    """Require explicit opposite event sides; never infer missing provenance."""
+    first = str(side_selection).strip().casefold()
+    second = str(opposite_selection).strip().casefold()
+    if not first or not second:
+        return False
+    if market in {"Moneyline", "Spread"}:
+        return first != second
+    if market == "Total":
+        return {first, second} == {"over", "under"}
+    return False
 
 
 def _paired_lines_compatible(market: str, side_line: Any, opposite_line: Any) -> bool:

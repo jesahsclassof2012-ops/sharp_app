@@ -30,19 +30,43 @@ def test_no_vig_requires_same_source_line_and_time():
 
 
 def quote(**changes):
-    row = {"market": "Spread", "source": "Book A", "line": "+3", "observed_at_utc": "2026-01-02T18:00:00Z", "best_price": -110}
+    row = {"game_key": "nfl:a-vs-b:2026-01-02", "market": "Spread", "source": "Book A", "selection": "Team A", "line": "+3", "observed_at_utc": "2026-01-02T18:00:00Z", "best_price": -110}
     row.update(changes)
     return row
 
 
-def test_pair_validation_rejects_book_line_market_and_time_mismatches():
-    assert validated_no_vig_pair(quote(line="+3"), quote(line="-3")) == .5
-    assert validated_no_vig_pair(quote(market="Total", line="o45.5"), quote(market="Total", line="u45.5")) == .5
-    assert validated_no_vig_pair(quote(), quote(source="Book B")) is None
-    assert validated_no_vig_pair(quote(line="+3"), quote(line="-3.5")) is None
-    assert validated_no_vig_pair(quote(market="Total", line="o45.5"), quote(market="Total", line="o46")) is None
-    assert validated_no_vig_pair(quote(market="Spread"), quote(market="Moneyline")) is None
-    assert validated_no_vig_pair(quote(), quote(observed_at_utc="2026-01-02T18:10:01Z")) is None
+def test_moneyline_pairs_require_same_game_and_opposite_selections():
+    side = quote(market="Moneyline", selection="Team A", line="ML")
+    assert validated_no_vig_pair(side, quote(market="Moneyline", selection="Team B", line="ML")) == .5
+    assert validated_no_vig_pair(side, quote(market="Moneyline", selection="Team A", line="ML")) is None
+    assert validated_no_vig_pair(side, quote(market="Moneyline", selection="Team B", line="ML", game_key="nfl:c-vs-d:2026-01-02")) is None
+
+
+def test_spread_pairs_require_opposite_teams_and_complementary_lines():
+    side = quote(selection="Team A", line="+3")
+    assert validated_no_vig_pair(side, quote(selection="Team B", line="-3")) == .5
+    assert validated_no_vig_pair(side, quote(selection="Team A", line="-3")) is None
+    assert validated_no_vig_pair(side, quote(selection="Team B", line="-3.5")) is None
+    assert validated_no_vig_pair(side, quote(selection="Team B", line="-3", game_key="nfl:c-vs-d:2026-01-02")) is None
+
+
+def test_total_pairs_require_over_under_and_identical_thresholds():
+    over = quote(market="Total", selection="Over", line="o45.5")
+    assert validated_no_vig_pair(over, quote(market="Total", selection="Under", line="u45.5")) == .5
+    assert validated_no_vig_pair(over, quote(market="Total", selection="Over", line="o45.5")) is None
+    under = quote(market="Total", selection="Under", line="u45.5")
+    assert validated_no_vig_pair(under, quote(market="Total", selection="Under", line="u45.5")) is None
+    assert validated_no_vig_pair(over, quote(market="Total", selection="Under", line="u46")) is None
+    assert validated_no_vig_pair(over, quote(market="Total", selection="Under", line="u45.5", game_key="nfl:c-vs-d:2026-01-02")) is None
+
+
+def test_pair_validation_still_rejects_book_market_and_time_mismatches():
+    side = quote(selection="Team A", line="+3")
+    assert validated_no_vig_pair(side, quote(selection="Team B", line="-3", source="Book B")) is None
+    assert validated_no_vig_pair(side, quote(selection="Team B", line="-3", market="Moneyline")) is None
+    assert validated_no_vig_pair(side, quote(selection="Team B", line="-3", observed_at_utc="2026-01-02T18:10:01Z")) is None
+    assert validated_no_vig_pair(side, quote(selection="Team B", line="-3", game_key=None)) is None
+    assert validated_no_vig_pair(side, quote(selection=None, line="-3")) is None
 
 
 def test_diagnostics_are_raw_gap_and_safe_at_percentage_boundaries():

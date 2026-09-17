@@ -61,7 +61,8 @@ from crossing folds.
 ## Implemented offline benchmark framework
 
 Model 0A remains raw supplied market probability, only called no-vig when a
-validated same-source/same-line/synchronized pair is available. Model 0B fits a
+validated same-event, same-source, same-market, synchronized, opposite-side,
+compatible-line pair is available. Model 0B fits a
 regularized logistic recalibration on market probability. Models 1–4 add raw
 gap; Bets/Money plus interaction; `log1p(minutes_to_start)`; then leakage-safe
 movement. Model 4 is compared to a Model-3 movement cohort on exactly the same
