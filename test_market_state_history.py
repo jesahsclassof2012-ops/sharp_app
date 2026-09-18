@@ -181,6 +181,19 @@ def test_operational_summary_keeps_horizons_separate_and_uses_per_sport_as_of():
     assert data["operational_coverage"]["as_of"] == "2026-01-03T12:00:00Z"
     assert data["operational_breakdowns"]["by_sport"]["NFL"]["coverage"]["as_of"] == "2026-01-02T18:40:00Z"
     assert data["operational_breakdowns"]["by_sport"]["MLB"]["coverage"]["as_of"] == "2026-01-03T12:00:00Z"
+    assert set(data["operational_breakdowns"]["by_event_date"]) == {"2026-01-02"}
+
+
+def test_capture_trend_limits_to_latest_seven_matured_event_dates():
+    snapshots = []
+    for day in range(1, 9):
+        rows = pair(f"2026-01-{day:02d}T19:40:00Z")
+        for row in rows:
+            row.update(game_key=f"g-{day}", signal_key=f"{row['signal_key']}-{day}", event_start_utc=f"2026-01-{day:02d}T20:00:00Z")
+        snapshots.extend(rows)
+    data = summarize_market_state_history(snapshots, [])
+    trend = data["operational_breakdowns"]["by_event_date"]
+    assert len(trend) == 7 and "2026-01-01" not in trend and "2026-01-08" in trend
 
 
 def test_gate_progress_uses_exact_gate_cohort_and_shared_thresholds():

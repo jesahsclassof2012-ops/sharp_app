@@ -116,11 +116,15 @@ def operational_capture_breakdowns(snapshots: list[dict[str, Any]], states: list
     for sport in sorted({str(row.get("sport")) for row in snapshots if row.get("sport")}):
         scoped_rows = [row for row in snapshots if row.get("sport") == sport]
         sports[sport] = {"coverage": compact(scoped_rows, [row for row in states if row.get("sport") == sport]), "observed_game_markets": len(_supported_groups(scoped_rows)), "recorded_results": len({row.get("game_key") for row in results if row.get("sport") == sport})}
-    dates = sorted({moment.date().isoformat() for row in snapshots if (moment := _timestamp(row.get("event_start_utc")))}, reverse=True)[:7]
+    dates = sorted({moment.date().isoformat() for row in snapshots if (moment := _timestamp(row.get("event_start_utc")))}, reverse=True)
     trend = {}
     for date in dates:
         scoped_rows = [row for row in snapshots if (moment := _timestamp(row.get("event_start_utc"))) and moment.date().isoformat() == date]
-        trend[date] = compact(scoped_rows, [row for row in states if (moment := _timestamp(row.get("event_start_utc"))) and moment.date().isoformat() == date])
+        coverage = compact(scoped_rows, [row for row in states if (moment := _timestamp(row.get("event_start_utc"))) and moment.date().isoformat() == date])
+        if any(values["matured"] for values in coverage["by_horizon"].values()):
+            trend[date] = coverage
+        if len(trend) == 7:
+            break
     return {"by_market": markets, "by_sport": sports, "by_event_date": trend}
 
 def read_research_history(sport: str = "All sports") -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
