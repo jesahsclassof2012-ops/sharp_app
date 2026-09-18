@@ -71,6 +71,45 @@ def test_readiness_failures_stay_separate_and_recent_horizon_is_scoped(monkeypat
     assert recent.iloc[0]["Reference selection"] == "A"
 
 
+def test_readiness_gates_remain_independent_in_mixed_states(monkeypatch):
+    fake = FakeResearchStreamlit()
+    data = research_data((), ("binary W/L rows",))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test"); monkeypatch.setattr(app, "st", fake); monkeypatch.setattr(app, "cached_market_state_history", lambda sport: data)
+    app.render_history()
+    joined = "\n".join(fake.text)
+    assert "MAIN — Ready for manual benchmark" in joined
+    assert "MOVEMENT — Not enough history" in joined
+    assert "Not enough movement-qualified win/loss rows" in joined
+
+    fake = FakeResearchStreamlit()
+    data = research_data(("unique settled games",), ())
+    monkeypatch.setattr(app, "st", fake); monkeypatch.setattr(app, "cached_market_state_history", lambda sport: data)
+    app.render_history()
+    joined = "\n".join(fake.text)
+    assert "MAIN — Not enough history" in joined
+    assert "MOVEMENT — Ready for manual benchmark" in joined
+    assert "Not enough settled games" in joined
+
+
+def test_market_state_research_requests_and_renders_selected_sport_scope(monkeypatch):
+    fake = FakeResearchStreamlit(sport="NFL")
+    requested = []
+    all_data = research_data(); nfl_data = research_data()
+    nfl_data["summary"] = {**nfl_data["summary"], "stored_observations": 2, "unique_games": 2, "valid_states": 2, "recorded_results": 2}
+
+    def scoped_history(sport):
+        requested.append(sport)
+        return all_data if sport == "All sports" else nfl_data
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test")
+    monkeypatch.setattr(app, "st", fake)
+    monkeypatch.setattr(app, "cached_market_state_history", scoped_history)
+    app.render_history()
+    assert requested == ["All sports", "NFL"]
+    assert ("Stored observations", 2) in fake.metrics
+    assert ("Recorded game results", 2) in fake.metrics
+
+
 def test_research_cache_is_sport_scoped(monkeypatch):
     calls = []
     monkeypatch.setattr(app, "read_research_history", lambda sport: (calls.append(sport) or ([], [])))
