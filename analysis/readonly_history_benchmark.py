@@ -18,9 +18,10 @@ from analysis.signal_model_benchmark import (
     binary_metrics,
     chronological_game_folds,
     decision_rows,
+    primary_model_eligible,
     run_walk_forward_benchmark,
 )
-from history_store import calculate_clv, executable_pregame, line_value
+from history_store import american_profit, calculate_clv, executable_pregame, line_value
 
 
 READER_ROLE = "sharp_benchmark_reader"
@@ -61,6 +62,17 @@ MOVEMENT_GATES = {
     "binary_rows": 100,
     "folds": 3,
     "test_games_per_fold": 10,
+}
+MIN_DIAGNOSTIC_ROWS = 20
+MIN_ROI_BOOTSTRAP_GAMES = 20
+REPORT_AUDIT_KEYS = {
+    "total_snapshots", "total_results", "earliest_snapshot", "latest_snapshot",
+    "earliest_event_start", "latest_event_start", "sports", "markets",
+    "result_coverage_by_sport", "result_coverage_by_market", "distinct_games",
+    "distinct_signals", "settled_games", "unsettled_games", "baseline_decisions",
+    "wins", "losses", "pushes", "binary_rows", "event_dates", "movement_rows",
+    "movement_games", "movement_coverage_pct", "valid_pct", "time_to_start",
+    "repeated_snapshot_counts", "same_kickoff_groups", "missing_entry_features",
 }
 
 
@@ -172,6 +184,15 @@ def audit_statistics(snapshots: list[dict[str, Any]], results: list[dict[str, An
     times = [row.get("minutes_to_start") for row in entries if row.get("minutes_to_start") is not None]
     repeated_signals = Counter(row["signal_key"] for row in snapshots)
     repeated_games = Counter(row["game_key"] for row in snapshots)
+    result_games = {row["game_key"] for row in results}
+    by_sport = {}
+    for sport, rows in _groups(snapshots, lambda row: row.get("sport")).items():
+        games = {row["game_key"] for row in rows}
+        by_sport[sport] = {"snapshots": len(rows), "games": len(games), "settled_games": len(games & result_games)}
+    by_market = {}
+    for market, rows in _groups(snapshots, lambda row: row.get("market")).items():
+        entry_rows = [row for row in entries if row.get("market") == market]
+        by_market[market] = {"snapshots": len(rows), "baseline_decisions": len(entry_rows), "settled_games": len({row["game_key"] for row in entry_rows})}
     return {
         "total_snapshots": len(snapshots),
         "total_results": len(results),
@@ -181,6 +202,8 @@ def audit_statistics(snapshots: list[dict[str, Any]], results: list[dict[str, An
         "latest_event_start": max((row.get("event_start_utc") for row in snapshots), default=None),
         "sports": dict(sorted(Counter(row.get("sport") for row in snapshots).items())),
         "markets": dict(sorted(Counter(row.get("market") for row in snapshots).items())),
+        "result_coverage_by_sport": dict(sorted(by_sport.items())),
+        "result_coverage_by_market": dict(sorted(by_market.items())),
         "distinct_games": len({row["game_key"] for row in snapshots}),
         "distinct_signals": len({row["signal_key"] for row in snapshots}),
         "settled_games": len({row["game_key"] for row in entries}),
@@ -225,7 +248,11 @@ def _time_distribution(values: list[float]) -> dict[str, int]:
 
 def sufficiency_gate(entries: list[dict[str, Any]], movement: bool = False) -> dict[str, Any]:
     """Predeclared gate evaluated before any fit or model metric is produced."""
-    cohort = [row for row in entries if not movement or row.get("movement_60m") is not None]
+    # The gate measures the exact common primary population, not a looser set
+    # that one challenger might later be unable to score.
+    cohort = [row for row in entries if primary_model_eligible(row)]
+    if movement:
+        cohort = [row for row in cohort if row.get("movement_60m") is not None]
     binary = [row for row in cohort if row.get("binary_target") is not None]
     gates = MOVEMENT_GATES if movement else MAIN_GATES
     folds = chronological_game_folds(cohort, folds=gates["folds"])
@@ -263,12 +290,135 @@ def _percentile_interval(values: list[float]) -> list[float]:
     return [ordered[int(.025 * (len(ordered) - 1))], ordered[int(.975 * (len(ordered) - 1))]]
 
 
+def _groups(rows: Iterable[dict[str, Any]], key):
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(key(row) if key(row) is not None else "missing")].append(row)
+    return grouped
+
+
+def _economic_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    wins = sum(row.get("outcome") == "win" for row in rows)
+    losses = sum(row.get("outcome") == "loss" for row in rows)
+    pushes = sum(row.get("outcome") == "push" for row in rows)
+    units = sum(
+        american_profit(int(row["best_price"])) if row.get("outcome") == "win" else -1 if row.get("outcome") == "loss" else 0
+        for row in rows if row.get("best_price") not in (None, 0)
+    )
+    clv = [float(row["clv"]) for row in rows if row.get("clv") is not None]
+    markets = {row.get("market") for row in rows}
+    return {
+        "bets": len(rows), "wins": wins, "losses": losses, "pushes": pushes,
+        "win_rate_excluding_pushes": wins / (wins + losses) if wins + losses else None,
+        "units": units, "roi": units / len(rows) if rows else None,
+        "average_predicted_edge": sum(float(row.get("predicted_edge") or 0) for row in rows) / len(rows) if rows else None,
+        "captured_close_average_clv": sum(clv) / len(clv) if clv and len(markets) == 1 else None,
+        "positive_captured_clv_rate": sum(value > 0 for value in clv) / len(clv) if clv else None,
+    }
+
+
+def _time_bucket(row: dict[str, Any]) -> str:
+    value = row.get("minutes_to_start")
+    if value is None: return "missing"
+    if value <= 60: return "<=60 minutes"
+    if value <= 180: return ">60-180 minutes"
+    if value <= 720: return ">180-720 minutes"
+    return ">720 minutes"
+
+
+def _gap_bucket(row: dict[str, Any]) -> str:
+    value = row.get("raw_gap")
+    if value is None: return "missing"
+    if value <= 0: return "<=0"
+    if value <= 5: return ">0-5"
+    if value <= 10: return ">5-10"
+    if value <= 20: return ">10-20"
+    return ">20"
+
+
+def _ticket_bucket(row: dict[str, Any]) -> str:
+    value = row.get("bets_pct")
+    if value is None: return "missing"
+    if value < 25: return "<25%"
+    if value < 50: return "25-50%"
+    if value < 75: return "50-75%"
+    return "75%+"
+
+
+def _calendar_period(row: dict[str, Any]) -> str:
+    date = _date(row.get("event_start_utc"))
+    return date[:7] if date else "missing"
+
+
+def diagnostic_breakdowns(rows: list[dict[str, Any]], minimum_rows: int = MIN_DIAGNOSTIC_ROWS) -> dict[str, Any]:
+    """Aggregate only adequately sized OOS buckets; suppress smaller buckets."""
+    dimensions = {
+        "sport": lambda row: row.get("sport"),
+        "market": lambda row: row.get("market"),
+        "sport_x_market": lambda row: f"{row.get('sport')} × {row.get('market')}",
+        "time_to_start": _time_bucket,
+        "raw_gap": _gap_bucket,
+        "ticket_share": _ticket_bucket,
+        "calendar_period": _calendar_period,
+    }
+    output = {}
+    for name, key in dimensions.items():
+        visible, suppressed = {}, {}
+        for bucket, values in _groups(rows, key).items():
+            if len(values) >= minimum_rows:
+                visible[bucket] = _economic_summary(values)
+            else:
+                suppressed[bucket] = len(values)
+        output[name] = {"minimum_rows": minimum_rows, "buckets": visible, "suppressed_bucket_rows": suppressed}
+    return output
+
+
+def _matched_predictions(predictions: dict[str, list[dict[str, Any]]], challenger: str, baseline: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    base_by_key = {(row["fold"], row["signal_key"]): row for row in predictions.get(baseline, [])}
+    pairs = [(base_by_key[key], row) for key, row in {(item["fold"], item["signal_key"]): item for item in predictions.get(challenger, [])}.items() if key in base_by_key]
+    return [pair[0] for pair in pairs], [pair[1] for pair in pairs]
+
+
+def matched_comparison(predictions: dict[str, list[dict[str, Any]]], challenger: str, baseline: str) -> dict[str, Any]:
+    base, model = _matched_predictions(predictions, challenger, baseline)
+    base_metrics, model_metrics = binary_metrics(base, "prediction"), binary_metrics(model, "prediction")
+    return {
+        "matched_rows": len(model), "matched_games": len({row["game_key"] for row in model}),
+        "baseline": baseline, "challenger": challenger,
+        "delta_log_loss": None if model_metrics["log_loss"] is None or base_metrics["log_loss"] is None else model_metrics["log_loss"] - base_metrics["log_loss"],
+        "delta_brier": None if model_metrics["brier"] is None or base_metrics["brier"] is None else model_metrics["brier"] - base_metrics["brier"],
+    }
+
+
+def roi_bootstrap_by_bucket(rows: list[dict[str, Any]], seed: int = 20260917, rounds: int = 200) -> dict[str, Any]:
+    """Bootstrap ROI by game for fixed predeclared edge buckets only."""
+    output = {}
+    for bucket, values in _groups(rows, lambda row: _edge_bucket_name(row.get("predicted_edge"))).items():
+        games = _groups(values, lambda row: row["game_key"])
+        if len(games) < MIN_ROI_BOOTSTRAP_GAMES:
+            output[bucket] = {"available": False, "distinct_games": len(games)}
+            continue
+        rng = random.Random(seed); keys = list(games); rois = []
+        for _ in range(rounds):
+            sampled = [row for key in (rng.choice(keys) for _ in keys) for row in games[key]]
+            rois.append(_economic_summary(sampled)["roi"])
+        output[bucket] = {"available": True, "distinct_games": len(games), "roi_ci_95": _percentile_interval(rois)}
+    return output
+
+
+def _edge_bucket_name(edge: Any) -> str:
+    if edge is None or edge <= 0: return "<=0%"
+    if edge <= .02: return ">0% to 2%"
+    if edge <= .05: return ">2% to 5%"
+    return ">5%"
+
+
 def benchmark_if_sufficient(entries: list[dict[str, Any]]) -> dict[str, Any]:
     """Run only predeclared-sufficient models; keep movement comparison matched."""
     main = sufficiency_gate(entries)
     movement = sufficiency_gate(entries, movement=True)
     if not main["passed"]:
-        return {"main_gate": main, "movement_gate": movement, "models": {}}
+        return {"main_gate": main, "movement_gate": movement, "models": {}, "fold_metrics": [], "calibration": {}, "edge_buckets": {}, "uncertainty": {}, "roi_uncertainty": {}, "comparisons": {}, "diagnostics": {}}
     result = run_walk_forward_benchmark(main["cohort"], folds=MAIN_GATES["folds"])
     models = {name: values for name, values in result["metrics"].items() if name != "Model 4" and name != "Model 3 movement cohort"}
     if not movement["passed"]:
@@ -280,23 +430,42 @@ def benchmark_if_sufficient(entries: list[dict[str, Any]]) -> dict[str, Any]:
     uncertainty = {name: _bootstrap_deltas(result["predictions"], name, "Model 0B") for name in ("Model 1", "Model 2", "Model 3")}
     if movement["passed"]:
         uncertainty["Model 4 vs Model 3 movement cohort"] = _bootstrap_deltas(result["predictions"], "Model 4", "Model 3 movement cohort")
-    return {"main_gate": main, "movement_gate": movement, "models": models, "fold_metrics": result["fold_metrics"], "calibration": result["calibration"], "edge_buckets": result["edge_buckets"], "uncertainty": uncertainty}
+    comparisons = {
+        "Model 1 vs Model 0B": matched_comparison(result["predictions"], "Model 1", "Model 0B"),
+        "Model 2 vs Model 0B": matched_comparison(result["predictions"], "Model 2", "Model 0B"),
+        "Model 2 vs Model 1": matched_comparison(result["predictions"], "Model 2", "Model 1"),
+        "Model 3 vs Model 2": matched_comparison(result["predictions"], "Model 3", "Model 2"),
+        "Model 0A vs Model 0B": matched_comparison(result["predictions"], "Model 0A", "Model 0B"),
+    }
+    if movement["passed"]:
+        comparisons["Model 4 vs Model 3 movement cohort"] = matched_comparison(result["predictions"], "Model 4", "Model 3 movement cohort")
+    oos_primary = result["predictions"].get("Model 3", [])
+    visible_models = set(models)
+    roi_uncertainty = {name: roi_bootstrap_by_bucket(values) for name, values in result["predictions"].items() if name in visible_models}
+    return {"main_gate": main, "movement_gate": movement, "models": models, "fold_metrics": [row for row in result["fold_metrics"] if row["model"] in visible_models], "calibration": {name: values for name, values in result["calibration"].items() if name in visible_models}, "edge_buckets": {name: values for name, values in result["edge_buckets"].items() if name in visible_models}, "uncertainty": uncertainty, "roi_uncertainty": roi_uncertainty, "comparisons": comparisons, "diagnostics": diagnostic_breakdowns(oos_primary)}
 
 
 def render_report(audit: dict[str, Any], benchmark: dict[str, Any]) -> str:
     """Render aggregates only; do not include source rows, matchups, or a DSN."""
-    safe_audit = _redact_sensitive(audit)
+    safe_audit = _redact_sensitive({key: value for key, value in audit.items() if key in REPORT_AUDIT_KEYS})
     return "\n".join((
         "# Read-only production-history benchmark",
         "", "## Safety", "- Reader role and read-only session verified before SELECT queries.",
         "- This report contains aggregate research results only; no credentials or raw rows.",
         "- Market baseline is **one-sided implied market probability**, not no-vig.",
+        "- Defensible same-book paired-price provenance: **unavailable** in the current stored schema.",
         "- Captured-close CLV, where available, is not an official sportsbook closing line.",
         "", "## Population limitation", "The stored population is the application's provider-card collection path. Baseline decisions are selection-conditioned on executable positive-gap entries and do not represent a complete sportsbook board.",
         "", "## Audit", "```json", json.dumps(safe_audit, indent=2, sort_keys=True), "```",
         "", "## Sufficiency", "```json", json.dumps({key: {"passed": value["passed"], "failures": value["failures"]} for key, value in (("main", benchmark["main_gate"]), ("movement", benchmark["movement_gate"]))}, indent=2), "```",
         "", "## Out-of-sample benchmark", "```json", json.dumps(benchmark.get("models", {}), indent=2, sort_keys=True), "```",
+        "", "## Matched model comparisons", "```json", json.dumps(benchmark.get("comparisons", {}), indent=2, sort_keys=True), "```",
+        "", "## Fold-by-fold OOS metrics", "```json", json.dumps(benchmark.get("fold_metrics", []), indent=2, sort_keys=True), "```",
+        "", "## Calibration buckets", "```json", json.dumps(benchmark.get("calibration", {}), indent=2, sort_keys=True), "```",
+        "", "## Fixed predicted-edge bucket economics", "Includes bets, wins, losses, pushes, units, ROI, win rate excluding pushes, predicted edge, and captured-close CLV where compatible.", "```json", json.dumps(benchmark.get("edge_buckets", {}), indent=2, sort_keys=True), "```",
+        "", "## Game-clustered ROI uncertainty", "```json", json.dumps(benchmark.get("roi_uncertainty", {}), indent=2, sort_keys=True), "```",
         "", "## Uncertainty", "```json", json.dumps(benchmark.get("uncertainty", {}), indent=2, sort_keys=True), "```",
+        "", "## Diagnostic breakdowns", f"Only buckets with at least {MIN_DIAGNOSTIC_ROWS} OOS rows are displayed; smaller buckets are suppressed.", "```json", json.dumps(benchmark.get("diagnostics", {}), indent=2, sort_keys=True), "```",
         "", "No production ranking change is proposed by this research report.", "",
     ))
 

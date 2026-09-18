@@ -167,6 +167,22 @@ def test_end_to_end_benchmark_is_oos_deterministic_and_movement_matched():
     assert first["edge_buckets"]["Model 1"]
 
 
+def test_primary_models_use_one_matched_feature_complete_oos_population():
+    rows = synthetic_decisions()
+    rows[0]["raw_gap"] = None
+    rows[1]["bets_pct"] = None
+    rows[2]["money_pct"] = None
+    rows[3]["minutes_to_start"] = None
+    benchmark = run_walk_forward_benchmark(rows, folds=3)
+    primary = ("Model 0A", "Model 0B", "Model 1", "Model 2", "Model 3")
+    populations = [
+        {(row["fold"], row["game_key"], row["signal_key"]) for row in benchmark["predictions"][model]}
+        for model in primary
+    ]
+    assert populations and all(population == populations[0] for population in populations)
+    assert all(rows[index]["signal_key"] not in {key[2] for key in populations[0]} for index in range(4))
+
+
 def test_calibration_edge_buckets_and_training_only_threshold_are_fixed():
     calibration = calibration_buckets([{"prediction": .45, "binary_target": 1}, {"prediction": .45, "binary_target": 0}, {"prediction": .8, "binary_target": 1}])
     middle = next(row for row in calibration if row["bucket"] == "40–50%")
