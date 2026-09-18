@@ -118,7 +118,19 @@ def test_market_state_rejects_bad_percentages_gap_identity_and_data_quality():
     for left, right in cases:
         states, audit = build_market_states([left, right])
         assert states == []
-        assert audit["malformed_pairs"] + audit["data_quality_failures"] == 1
+        assert audit["malformed_pairs"] + audit["data_quality_failures"] + audit["share_sum_failures"] == 1
+
+
+def test_complementary_share_tolerance_accepts_rounding_and_audits_failures():
+    first, second = paired_state()
+    for total in (99, 100, 101):
+        right = dict(second, bets_pct=total - first["bets_pct"], money_pct=total - first["money_pct"])
+        right["money_minus_bets_gap"] = right["money_pct"] - right["bets_pct"]
+        states, _ = build_market_states([first, right])
+        assert len(states) == 1
+    malformed = dict(second, bets_pct=30, money_pct=10, money_minus_bets_gap=-20)
+    states, audit = build_market_states([first, malformed])
+    assert states == [] and audit["share_sum_failures"] == 1
 
 
 def test_landmarks_are_backward_only_and_choose_latest_usable_quote():
@@ -182,7 +194,7 @@ def test_threshold_lock_policy_skips_nonexecutable_then_locks_once_and_records_r
     states, _ = build_market_states(raw)
     entries, audit = threshold_lock_entries(states, [{"game_key": raw[0]["game_key"], "away_score": 24, "home_score": 20}], thresholds=(5,))
     assert len(entries) == 1 and entries[0]["entry_side"] == "canonical" and entries[0]["later_threshold_reversal"]
-    assert audit["non_executable_qualifying_states"] == 1 and audit["locked_entries"] == 1
+    assert audit["5"]["non_executable_qualifying_states"] == 1 and audit["5"]["locked_entries"] == 1
 
 
 def test_threshold_coverage_is_sequential_and_anchor_is_not_an_entry():
@@ -203,7 +215,7 @@ def test_pre_entry_gap_blocks_entry_and_reversal_requires_opposite_threshold():
     raw = [dict(row, event_start_utc=start) for row in [*anchor, *after_gap]]
     states, _ = build_market_states(raw)
     entries, audit = threshold_lock_entries(states, [], thresholds=(5,))
-    assert entries == [] and audit["gap_censored_before_entry"] == 1
+    assert entries == [] and audit["5"]["gap_censored_before_entry"] == 1
     # Explicit threshold magnitude: a -2 response cannot reverse a +20 entry.
     mid = paired_state(observed="2026-01-01T20:30:00Z", gap=20)
     low_opposite = paired_state(observed="2026-01-01T21:00:00Z", gap=-2)
@@ -211,6 +223,18 @@ def test_pre_entry_gap_blocks_entry_and_reversal_requires_opposite_threshold():
     states, _ = build_market_states(raw)
     entries, _ = threshold_lock_entries(states, [], thresholds=(5,))
     assert entries[0]["later_threshold_reversal"] is False
+
+
+def test_threshold_audit_is_policy_specific_and_unsettled_lock_is_not_settled():
+    start = "2026-01-02T20:00:00Z"
+    anchor = paired_state(observed="2026-01-01T20:00:00Z", gap=2)
+    entry = paired_state(observed="2026-01-01T20:30:00Z", gap=6)
+    raw = [dict(row, event_start_utc=start) for row in [*anchor, *entry]]
+    states, _ = build_market_states(raw)
+    entries, audit = threshold_lock_entries(states, [], thresholds=(5, 10))
+    assert audit.keys() == {"5", "10"} and audit["5"]["locked_entries"] == 1 and audit["10"]["locked_entries"] == 0
+    summary = readonly._threshold_economic_summary(entries)
+    assert summary["locked_entries_total"] == 1 and summary["settled_entries"] == 0 and summary["unsettled_entries"] == 1 and summary["roi"] is None
 
 
 def test_one_baseline_decision_and_push_binary_exclusion():

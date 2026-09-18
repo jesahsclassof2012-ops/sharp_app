@@ -321,7 +321,7 @@ def _reversal_breakdown(states: list[dict[str, Any]], field: str) -> dict[str, A
     for value, group in _groups(states, lambda row: row.get(field)).items():
         series = direction_reversal_audit(group)
         count = len(series); raw = sum(item["raw_flip_count"] for item in series.values())
-        output[value] = {"series_count": count, "series_with_raw_flip": sum(item["raw_flip_count"] > 0 for item in series.values()), "raw_flip_count": raw, "raw_flip_rate": raw / count if count else 0.0,
+        output[value] = {"series_count": count, "series_with_raw_flip": sum(item["raw_flip_count"] > 0 for item in series.values()), "raw_flip_count": raw, "raw_flip_rate": sum(item["raw_flip_count"] > 0 for item in series.values()) / count if count else 0.0,
                          "material": {str(threshold): {"series_with_reversal": sum(item["material"][threshold]["count"] > 0 for item in series.values()), "reversal_count": sum(item["material"][threshold]["count"] for item in series.values()), "reversal_rate": sum(item["material"][threshold]["count"] > 0 for item in series.values()) / count if count else 0.0} for threshold in (5, 10, 15, 20)}}
     return output
 
@@ -340,10 +340,19 @@ def _economic_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "bets": len(rows), "wins": wins, "losses": losses, "pushes": pushes,
         "win_rate_excluding_pushes": wins / (wins + losses) if wins + losses else None,
         "units": units, "roi": units / len(rows) if rows else None,
-        "average_predicted_edge": sum(float(row.get("predicted_edge") or 0) for row in rows) / len(rows) if rows else None,
+        "average_predicted_edge": (sum(float(row["predicted_edge"]) for row in rows if row.get("predicted_edge") is not None) / sum(row.get("predicted_edge") is not None for row in rows) if any(row.get("predicted_edge") is not None for row in rows) else None),
         "captured_close_average_clv": sum(clv) / len(clv) if clv and len(markets) == 1 else None,
         "positive_captured_clv_rate": sum(value > 0 for value in clv) / len(clv) if clv else None,
     }
+
+
+def _threshold_economic_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Threshold policy ROI uses only explicitly settled lock entries."""
+    settled = [row for row in rows if row.get("outcome") in {"win", "loss", "push"}]
+    invalid = [row for row in rows if row.get("outcome") not in {"win", "loss", "push", None}]
+    summary = _economic_summary(settled)
+    summary.update({"locked_entries_total": len(rows), "settled_entries": len(settled), "unsettled_entries": sum(row.get("outcome") is None for row in rows), "invalid_settlement_entries": len(invalid)})
+    return summary
 
 
 def _time_bucket(row: dict[str, Any]) -> str:
@@ -562,14 +571,15 @@ def run() -> dict[str, Any]:
     }
     reversal = direction_reversal_audit(states)
     audit["reversal_audit"] = {
-        "series": len(reversal), "raw_flips": sum(value["raw_flip_count"] for value in reversal.values()),
-        "material_reversals": {str(threshold): sum(value["material"][threshold]["count"] for value in reversal.values()) for threshold in (5, 10, 15, 20)},
+        "series_count": len(reversal), "series_with_raw_flip": sum(value["raw_flip_count"] > 0 for value in reversal.values()), "raw_flip_count": sum(value["raw_flip_count"] for value in reversal.values()),
+        "raw_flip_rate": sum(value["raw_flip_count"] > 0 for value in reversal.values()) / len(reversal) if reversal else 0.0,
+        "material_reversals": {str(threshold): {"series_with_reversal": sum(value["material"][threshold]["count"] > 0 for value in reversal.values()), "reversal_count": sum(value["material"][threshold]["count"] for value in reversal.values()), "reversal_rate": sum(value["material"][threshold]["count"] > 0 for value in reversal.values()) / len(reversal) if reversal else 0.0} for threshold in (5, 10, 15, 20)},
         "by_sport": _reversal_breakdown(states, "sport"), "by_market": _reversal_breakdown(states, "market"),
     }
     locked, threshold_audit = threshold_lock_entries(states, results)
     audit["threshold_coverage"] = threshold_audit
-    audit["threshold_lock_economics"] = {str(threshold): _economic_summary([row for row in locked if row.get("threshold") == threshold]) for threshold in (5, 10, 15, 20)}
-    audit["threshold_reversal_diagnostics"] = {status: sum(row.get("reversal_followup_status") == status for row in locked) for status in ("reversal_observed", "no_reversal_complete_followup", "reversal_followup_censored")}
+    audit["threshold_lock_economics"] = {str(threshold): _threshold_economic_summary([row for row in locked if row.get("threshold") == threshold]) for threshold in (5, 10, 15, 20)}
+    audit["threshold_reversal_diagnostics"] = {str(threshold): {status: sum(row.get("threshold") == threshold and row.get("reversal_followup_status") == status for row in locked) for status in ("reversal_observed", "no_reversal_complete_followup", "reversal_followup_censored")} for threshold in (5, 10, 15, 20)}
     per_landmark = {}
     for horizon in (360, 180, 60):
         result = benchmark_if_sufficient([row for row in entries if row.get("landmark_horizon_minutes") == horizon])

@@ -28,6 +28,7 @@ MOVEMENT_TOLERANCE_MINUTES = 20
 # not live scanner thresholds.
 MARKET_GAP_SUM_TOLERANCE = 1e-9
 SPLIT_GAP_VALUE_TOLERANCE = 1e-9
+SPLIT_SHARE_SUM_TOLERANCE = 1.0
 LANDMARK_HORIZONS_MINUTES = (360, 180, 60)
 LANDMARK_MAX_STALENESS_MINUTES = 45
 MATERIAL_REVERSAL_THRESHOLDS = (5, 10, 15, 20)
@@ -452,7 +453,7 @@ def build_market_states(snapshots: Iterable[dict[str, Any]]) -> tuple[list[dict[
         if row.get("game_key") and row.get("market") in CANONICAL_SIDES and row.get("observed_at_utc"):
             grouped[(str(row["game_key"]), str(row["market"]), str(row["observed_at_utc"]))].append(row)
     states: list[dict[str, Any]] = []
-    audit = {"complete_pairs": 0, "incomplete_pairs": 0, "duplicate_sides": 0, "malformed_pairs": 0, "zero_sum_failures": 0, "data_quality_failures": 0, "valid_split_states": 0,
+    audit = {"complete_pairs": 0, "incomplete_pairs": 0, "duplicate_sides": 0, "malformed_pairs": 0, "zero_sum_failures": 0, "share_sum_failures": 0, "data_quality_failures": 0, "valid_split_states": 0,
              "canonical_executable_quote_available": 0, "canonical_executable_quote_missing": 0, "opposite_executable_quote_available": 0, "opposite_executable_quote_missing": 0, "both_executable": 0, "neither_executable": 0}
     for (game, market, observed), rows in grouped.items():
         canonical_side, opposite_side = CANONICAL_SIDES[market]
@@ -478,9 +479,13 @@ def build_market_states(snapshots: Iterable[dict[str, Any]]) -> tuple[list[dict[
         try:
             range_valid = all(0 <= float(value) <= 100 for value in (canonical.get("bets_pct"), canonical.get("money_pct"), opposite.get("bets_pct"), opposite.get("money_pct")))
             stored_consistent = abs(canonical_gap - (float(canonical["money_pct"]) - float(canonical["bets_pct"]))) <= SPLIT_GAP_VALUE_TOLERANCE and abs(opposite_gap - (float(opposite["money_pct"]) - float(opposite["bets_pct"]))) <= SPLIT_GAP_VALUE_TOLERANCE
+            shares_complementary = abs(float(canonical["bets_pct"]) + float(opposite["bets_pct"]) - 100) <= SPLIT_SHARE_SUM_TOLERANCE and abs(float(canonical["money_pct"]) + float(opposite["money_pct"]) - 100) <= SPLIT_SHARE_SUM_TOLERANCE
             identity_consistent = canonical.get("event_start_utc") == opposite.get("event_start_utc") and (not canonical.get("sport") or not opposite.get("sport") or canonical.get("sport") == opposite.get("sport")) and (not canonical.get("matchup") or not opposite.get("matchup") or canonical.get("matchup") == opposite.get("matchup"))
         except (TypeError, ValueError):
-            range_valid = stored_consistent = identity_consistent = False
+            range_valid = stored_consistent = identity_consistent = shares_complementary = False
+        if not shares_complementary:
+            audit["share_sum_failures"] += 1
+            continue
         if canonical_gap is None or opposite_gap is None or not valid_shares or not range_valid or not stored_consistent or not identity_consistent:
             audit["malformed_pairs"] += 1
             continue
@@ -622,16 +627,19 @@ def direction_reversal_audit(states: Iterable[dict[str, Any]]) -> dict[str, dict
 def threshold_lock_entries(states: Iterable[dict[str, Any]], results: Iterable[dict[str, Any]], thresholds: Iterable[int] = THRESHOLD_GAPS) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """First observed executable threshold entry; later reversals remain descriptive."""
     scores = {row.get("game_key"): row for row in results}; output = []
-    audit = {"left_censored": 0, "gap_censored_before_entry": 0, "right_censored_without_entry": 0, "non_executable_qualifying_states": 0, "locked_entries": 0, "no_entry_complete_coverage": 0, "reversal_observed": 0, "no_reversal_complete_followup": 0, "reversal_followup_censored": 0}
+    thresholds = tuple(thresholds)
+    audit = {str(threshold): {"series_considered": 0, "left_censored": 0, "gap_censored_before_entry": 0, "right_censored_without_entry": 0, "non_executable_qualifying_states": 0, "locked_entries": 0, "no_entry_complete_coverage": 0, "reversal_observed": 0, "no_reversal_complete_followup": 0, "reversal_followup_censored": 0} for threshold in thresholds}
     for _, values in _grouped(states, lambda row: (row["game_key"], row["market"])).items():
         ordered = sorted(values, key=lambda row: _time(row["observed_at_utc"])); start = _time(ordered[0]["event_start_utc"]); window_start = start.timestamp() - ENTRY_WINDOW_MINUTES * 60
         anchors = [row for row in ordered if abs(_time(row["observed_at_utc"]).timestamp() - window_start) <= ENTRY_COVERAGE_START_GRACE_MINUTES * 60]
         if not anchors:
-            audit["left_censored"] += len(tuple(thresholds)); continue
+            for threshold in thresholds: audit[str(threshold)]["series_considered"] += 1; audit[str(threshold)]["left_censored"] += 1
+            continue
         coverage_start = min(anchors, key=lambda row: (abs(_time(row["observed_at_utc"]).timestamp() - window_start), _time(row["observed_at_utc"])))
         observed = [row for row in ordered if _time(row["observed_at_utc"]) >= _time(coverage_start["observed_at_utc"]) and _time(row["observed_at_utc"]) < start]
         end_covered = any(0 <= (start - _time(row["observed_at_utc"])).total_seconds() <= ENTRY_COVERAGE_END_GRACE_MINUTES * 60 for row in observed)
         for threshold in thresholds:
+            policy = audit[str(threshold)]; policy["series_considered"] += 1
             locked = None; coverage_broken = False; previous = None
             for state in observed:
                 timestamp = _time(state["observed_at_utc"])
@@ -643,15 +651,15 @@ def threshold_lock_entries(states: Iterable[dict[str, Any]], results: Iterable[d
                 if timestamp.timestamp() < window_start:
                     continue
                 if coverage_broken:
-                    audit["gap_censored_before_entry"] += 1; break
+                    policy["gap_censored_before_entry"] += 1; break
                 if abs(float(state["signed_gap"])) < threshold: continue
                 side = "canonical" if state["signed_gap"] > 0 else "opposite"
-                if not _quote_usable(state, side): audit["non_executable_qualifying_states"] += 1; continue
+                if not _quote_usable(state, side): policy["non_executable_qualifying_states"] += 1; continue
                 locked = (state, side); break
             if locked is None:
                 if coverage_broken: continue
-                if not end_covered: audit["right_censored_without_entry"] += 1
-                else: audit["no_entry_complete_coverage"] += 1
+                if not end_covered: policy["right_censored_without_entry"] += 1
+                else: policy["no_entry_complete_coverage"] += 1
                 continue
             state, side = locked; source = state[f"{side}_row"]; result = scores.get(state["game_key"])
             item = dict(source); item.update({"threshold": threshold, "entry_side": side, "decision_timestamp": state["observed_at_utc"], "signed_gap": state["signed_gap"], "locked": True})
@@ -664,6 +672,6 @@ def threshold_lock_entries(states: Iterable[dict[str, Any]], results: Iterable[d
             post_gapped = any((_time(after["observed_at_utc"]) - _time(before["observed_at_utc"])).total_seconds() > ENTRY_COVERAGE_MAX_GAP_MINUTES * 60 for before, after in zip([state, *post], [*post]))
             item["later_threshold_reversal"] = bool(later)
             item["reversal_followup_status"] = "reversal_observed" if later else "reversal_followup_censored" if post_gapped or not end_covered else "no_reversal_complete_followup"
-            audit[item["reversal_followup_status"]] += 1
-            output.append(item); audit["locked_entries"] += 1
+            policy[item["reversal_followup_status"]] += 1
+            output.append(item); policy["locked_entries"] += 1
     return output, audit

@@ -17,6 +17,9 @@ not independent selection baselines. Moneyline and Spread use away/home
 orientation; Total uses over/under. The canonical away/over gap is the signed
 gap. A valid split state requires a complete zero-sum pair but does not require
 a sportsbook quote; quote executability is checked only for modeling or entry.
+Paired Bets% and Money% each must sum to approximately 100, with a one
+percentage-point rounding tolerance; malformed share pairs are audited rather
+than normalized.
 
 Primary cohorts are fixed T-6h, T-3h, and T-1h landmarks. Each uses only the
 latest usable canonical quote at or before the target and within 45 minutes
@@ -36,6 +39,12 @@ censoring. Censored history cannot support a full first-entry or no-entry
 claim; right censoring after a locked entry does not erase that entry. Later
 reversals are descriptive only—no cash-out, hedge, or flip economics are
 invented.
+
+Threshold coverage and reversal follow-up are reported independently for each
+5/10/15/20pp policy. Locked-but-unsettled entries remain coverage evidence but
+are excluded from settled ROI; each policy's ROI denominator is settled entries
+only. Raw flip event count is distinct from the proportion of series with a
+flip. Missing model edge is N/A, never an invented zero-percent edge.
 
 All landmark cohorts remain separate under strict chronological game-grouped
 validation. The price baseline remains one-sided implied probability: current

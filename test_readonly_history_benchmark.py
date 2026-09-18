@@ -197,3 +197,10 @@ def test_roi_uncertainty_clusters_by_game_and_marks_small_samples_unavailable():
     bucket = bootstrap[">2% to 5%"]
     assert bucket["available"] is True and bucket["distinct_games"] == 20 and len(bucket["roi_ci_95"]) == 2
     assert benchmark.roi_bootstrap_by_bucket(rows[:19])[">2% to 5%"]["available"] is False
+
+
+def test_economic_summary_does_not_invent_zero_predicted_edge():
+    rows = [{"outcome": "win", "best_price": -110}, {"outcome": "loss", "best_price": -110, "predicted_edge": .04}]
+    summary = benchmark._economic_summary(rows)
+    assert summary["average_predicted_edge"] == .04
+    assert benchmark._economic_summary(rows[:1])["average_predicted_edge"] is None
