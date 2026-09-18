@@ -107,15 +107,15 @@ def gate_progress(gate: dict[str, Any], movement: bool = False) -> dict[str, int
     return {"games": len({row.get("game_key") for row in cohort if row.get("game_key")}), "binary_rows": len(binary), "event_dates": len(dates), "folds": len(gate.get("folds", [])), "game_goal": gates["unique_settled_games"], "binary_goal": gates["binary_rows"], "fold_goal": gates["folds"], "event_date_goal": gates.get("distinct_event_dates"), "passed": bool(gate.get("passed"))}
 
 
-def operational_capture_breakdowns(snapshots: list[dict[str, Any]], states: list[dict[str, Any]], results: list[dict[str, Any]]) -> dict[str, Any]:
+def operational_capture_breakdowns(snapshots: list[dict[str, Any]], states: list[dict[str, Any]], results: list[dict[str, Any]], as_of: Any = None) -> dict[str, Any]:
     """Aggregate event-date, market, and per-sport operational coverage."""
     def compact(rows: list[dict[str, Any]], paired: list[dict[str, Any]]) -> dict[str, Any]:
-        return operational_landmark_coverage(rows, paired)
+        return operational_landmark_coverage(rows, paired, as_of)
     markets = {market: compact([row for row in snapshots if row.get("market") == market], [row for row in states if row.get("market") == market]) for market in CANONICAL_SIDES}
     sports = {}
     for sport in sorted({str(row.get("sport")) for row in snapshots if row.get("sport")}):
         scoped_rows = [row for row in snapshots if row.get("sport") == sport]
-        sports[sport] = {"coverage": compact(scoped_rows, [row for row in states if row.get("sport") == sport]), "observed_game_markets": len(_supported_groups(scoped_rows)), "recorded_results": len({row.get("game_key") for row in results if row.get("sport") == sport})}
+        sports[sport] = {"coverage": operational_landmark_coverage(scoped_rows, [row for row in states if row.get("sport") == sport]), "observed_game_markets": len(_supported_groups(scoped_rows)), "recorded_results": len({row.get("game_key") for row in results if row.get("sport") == sport})}
     dates = sorted({moment.date().isoformat() for row in snapshots if (moment := _timestamp(row.get("event_start_utc")))}, reverse=True)
     trend = {}
     for date in dates:
@@ -143,4 +143,5 @@ def summarize_market_state_history(snapshots: list[dict[str, Any]], results: lis
     states, pair_audit = build_market_states(snapshots); entries, _ = landmark_decision_rows(states, results)
     by_horizon = {f"T-{hour}h": [row for row in entries if row.get("landmark_horizon_minutes") == hour * 60] for hour in (6, 3, 1)}
     readiness = {name: {"main": sufficiency_gate(rows), "movement": sufficiency_gate(rows, True)} for name, rows in by_horizon.items()}
-    return {"snapshots": snapshots, "results": results, "states": states, "entries": entries, "pair_audit": pair_audit, "coverage": landmark_coverage_audit(snapshots, states), "operational_coverage": operational_landmark_coverage(snapshots, states), "operational_breakdowns": operational_capture_breakdowns(snapshots, states, results), "by_horizon": by_horizon, "readiness": readiness, "progress": {name: {"main": gate_progress(value["main"]), "movement": gate_progress(value["movement"], True)} for name, value in readiness.items()}, "summary": {"stored_observations": len(snapshots), "unique_games": len({row.get("game_key") for row in snapshots}), "unique_game_markets": len(_supported_groups(snapshots)), "valid_states": len(states), "recorded_results": len({row.get("game_key") for row in results}), "non_ok_retained": pair_audit["non_ok_data_quality_pairs"]}}
+    operational = operational_landmark_coverage(snapshots, states)
+    return {"snapshots": snapshots, "results": results, "states": states, "entries": entries, "pair_audit": pair_audit, "coverage": landmark_coverage_audit(snapshots, states), "operational_coverage": operational, "operational_breakdowns": operational_capture_breakdowns(snapshots, states, results, operational["as_of"]), "by_horizon": by_horizon, "readiness": readiness, "progress": {name: {"main": gate_progress(value["main"]), "movement": gate_progress(value["movement"], True)} for name, value in readiness.items()}, "summary": {"stored_observations": len(snapshots), "unique_games": len({row.get("game_key") for row in snapshots}), "unique_game_markets": len(_supported_groups(snapshots)), "valid_states": len(states), "recorded_results": len({row.get("game_key") for row in results}), "non_ok_retained": pair_audit["non_ok_data_quality_pairs"]}}
