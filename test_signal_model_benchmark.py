@@ -8,6 +8,7 @@ from analysis.signal_model_benchmark import (
 )
 from history_store import game_key, signal_key
 from analysis import readonly_history_benchmark as readonly
+from analysis import signal_model_benchmark
 
 
 def snapshot(**changes):
@@ -335,6 +336,18 @@ def test_end_to_end_benchmark_is_oos_deterministic_and_movement_matched():
     assert {row["signal_key"] for row in first["predictions"]["Model 4"]} == {row["signal_key"] for row in first["predictions"]["Model 3 movement cohort"]}
     assert all(row["movement_60m"] is not None for row in first["predictions"]["Model 4"])
     assert first["edge_buckets"]["Model 1"]
+
+
+def test_movement_only_runner_does_not_refit_primary_models(monkeypatch):
+    fitted = []
+    original = signal_model_benchmark._fit_predict
+    def spy(train, test, model):
+        fitted.append(model)
+        return original(train, test, model)
+    monkeypatch.setattr(signal_model_benchmark, "_fit_predict", spy)
+    result = run_walk_forward_benchmark(synthetic_decisions(), folds=3, include_movement=True, include_primary=False)
+    assert set(result["metrics"]) == {"Model 3 movement cohort", "Model 4"}
+    assert fitted and set(fitted) <= {"Model 3", "Model 4"}
 
 
 def test_primary_models_use_one_matched_feature_complete_oos_population():

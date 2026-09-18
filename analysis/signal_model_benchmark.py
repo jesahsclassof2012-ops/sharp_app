@@ -401,22 +401,28 @@ def primary_model_eligible(row: dict[str, Any]) -> bool:
     return model_features(row, "Model 3") is not None
 
 
-def run_walk_forward_benchmark(rows: Iterable[dict[str, Any]], folds: int = 3, include_movement: bool = True) -> dict[str, Any]:
+def run_walk_forward_benchmark(
+    rows: Iterable[dict[str, Any]],
+    folds: int = 3,
+    include_movement: bool = True,
+    include_primary: bool = True,
+) -> dict[str, Any]:
     """Run fixed, chronological OOS models.  No test data informs fitting."""
     # Keep Models 0A–3 on exactly the same feature-complete rows in every fold.
     all_rows = [row for row in rows if primary_model_eligible(row)]
     fold_pairs = chronological_game_folds(all_rows, folds)
     predictions: dict[str, list[dict[str, Any]]] = defaultdict(list); fold_metrics = []
     for fold_id, (train, test) in enumerate(fold_pairs):
-        predicted = _raw_market_predictions(test)
-        for row in predicted: row["fold"] = fold_id; row["model"] = "Model 0A"
-        predictions["Model 0A"].extend(predicted)
-        fold_metrics.append({"model": "Model 0A", "fold": fold_id, **binary_metrics(predicted, "prediction")})
-        for model in ("Model 0B", "Model 1", "Model 2", "Model 3"):
-            predicted = _fit_predict(train, test, model)
-            for row in predicted: row["fold"] = fold_id; row["model"] = model
-            predictions[model].extend(predicted); metrics = binary_metrics(predicted, "prediction")
-            fold_metrics.append({"model": model, "fold": fold_id, **metrics})
+        if include_primary:
+            predicted = _raw_market_predictions(test)
+            for row in predicted: row["fold"] = fold_id; row["model"] = "Model 0A"
+            predictions["Model 0A"].extend(predicted)
+            fold_metrics.append({"model": "Model 0A", "fold": fold_id, **binary_metrics(predicted, "prediction")})
+            for model in ("Model 0B", "Model 1", "Model 2", "Model 3"):
+                predicted = _fit_predict(train, test, model)
+                for row in predicted: row["fold"] = fold_id; row["model"] = model
+                predictions[model].extend(predicted); metrics = binary_metrics(predicted, "prediction")
+                fold_metrics.append({"model": model, "fold": fold_id, **metrics})
         if include_movement:
             movement_train = [row for row in train if row.get("movement_60m") is not None]
             movement_test = [row for row in test if row.get("movement_60m") is not None]

@@ -457,34 +457,47 @@ def benchmark_if_sufficient(entries: list[dict[str, Any]]) -> dict[str, Any]:
     """Run only predeclared-sufficient models; keep movement comparison matched."""
     main = sufficiency_gate(entries)
     movement = sufficiency_gate(entries, movement=True)
-    if not main["passed"]:
-        return {"main_gate": main, "movement_gate": movement, "models": {}, "fold_metrics": [], "calibration": {}, "edge_buckets": {}, "uncertainty": {}, "roi_uncertainty": {}, "comparisons": {}, "diagnostics": {}}
-    result = run_walk_forward_benchmark(main["cohort"], folds=MAIN_GATES["folds"], include_movement=False)
-    models = {name: values for name, values in result["metrics"].items() if name != "Model 4" and name != "Model 3 movement cohort"}
+    result = {"predictions": {}, "metrics": {}, "fold_metrics": [], "calibration": {}, "edge_buckets": {}}
+    models = {}
+    if main["passed"]:
+        primary = run_walk_forward_benchmark(main["cohort"], folds=MAIN_GATES["folds"], include_movement=False)
+        result.update(primary)
+        models.update(primary["metrics"])
     if movement["passed"]:
-        movement_result = run_walk_forward_benchmark(movement["cohort"], folds=MOVEMENT_GATES["folds"], include_movement=True)
+        movement_result = run_walk_forward_benchmark(
+            movement["cohort"],
+            folds=MOVEMENT_GATES["folds"],
+            include_movement=True,
+            include_primary=False,
+        )
         for name in ("Model 3 movement cohort", "Model 4"):
             result["predictions"][name] = movement_result["predictions"].get(name, [])
             result["metrics"][name] = movement_result["metrics"].get(name, {})
+            result["calibration"][name] = movement_result["calibration"].get(name, [])
+            result["edge_buckets"][name] = movement_result["edge_buckets"].get(name, [])
         result["fold_metrics"].extend(row for row in movement_result["fold_metrics"] if row["model"] in {"Model 3 movement cohort", "Model 4"})
         models["Model 3 movement cohort"] = result["metrics"].get("Model 3 movement cohort", {})
         models["Model 4"] = result["metrics"].get("Model 4", {})
-    uncertainty = {name: _bootstrap_deltas(result["predictions"], name, "Model 0B") for name in ("Model 1", "Model 2", "Model 3")}
+    uncertainty = {}
+    if main["passed"]:
+        uncertainty.update({name: _bootstrap_deltas(result["predictions"], name, "Model 0B") for name in ("Model 1", "Model 2", "Model 3")})
     if movement["passed"]:
         uncertainty["Model 4 vs Model 3 movement cohort"] = _bootstrap_deltas(result["predictions"], "Model 4", "Model 3 movement cohort")
-    comparisons = {
-        "Model 1 vs Model 0B": matched_comparison(result["predictions"], "Model 1", "Model 0B"),
-        "Model 2 vs Model 0B": matched_comparison(result["predictions"], "Model 2", "Model 0B"),
-        "Model 2 vs Model 1": matched_comparison(result["predictions"], "Model 2", "Model 1"),
-        "Model 3 vs Model 2": matched_comparison(result["predictions"], "Model 3", "Model 2"),
-        "Model 0A vs Model 0B": matched_comparison(result["predictions"], "Model 0A", "Model 0B"),
-    }
+    comparisons = {}
+    if main["passed"]:
+        comparisons.update({
+            "Model 1 vs Model 0B": matched_comparison(result["predictions"], "Model 1", "Model 0B"),
+            "Model 2 vs Model 0B": matched_comparison(result["predictions"], "Model 2", "Model 0B"),
+            "Model 2 vs Model 1": matched_comparison(result["predictions"], "Model 2", "Model 1"),
+            "Model 3 vs Model 2": matched_comparison(result["predictions"], "Model 3", "Model 2"),
+            "Model 0A vs Model 0B": matched_comparison(result["predictions"], "Model 0A", "Model 0B"),
+        })
     if movement["passed"]:
         comparisons["Model 4 vs Model 3 movement cohort"] = matched_comparison(result["predictions"], "Model 4", "Model 3 movement cohort")
     oos_primary = result["predictions"].get("Model 3", [])
     visible_models = set(models)
     roi_uncertainty = {name: roi_bootstrap_by_bucket(values) for name, values in result["predictions"].items() if name in visible_models}
-    return {"main_gate": main, "movement_gate": movement, "models": models, "fold_metrics": [row for row in result["fold_metrics"] if row["model"] in visible_models], "calibration": {name: values for name, values in result["calibration"].items() if name in visible_models}, "edge_buckets": {name: values for name, values in result["edge_buckets"].items() if name in visible_models}, "uncertainty": uncertainty, "roi_uncertainty": roi_uncertainty, "comparisons": comparisons, "diagnostics": diagnostic_breakdowns(oos_primary)}
+    return {"main_gate": main, "movement_gate": movement, "models": models, "fold_metrics": [row for row in result["fold_metrics"] if row["model"] in visible_models], "calibration": {name: values for name, values in result["calibration"].items() if name in visible_models}, "edge_buckets": {name: values for name, values in result["edge_buckets"].items() if name in visible_models}, "uncertainty": uncertainty, "roi_uncertainty": roi_uncertainty, "comparisons": comparisons, "diagnostics": diagnostic_breakdowns(oos_primary) if main["passed"] else {}}
 
 
 def render_report(audit: dict[str, Any], benchmark: dict[str, Any]) -> str:

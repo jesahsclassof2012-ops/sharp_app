@@ -54,7 +54,10 @@ predictive-value, or production-readiness claim.
 
 Landmark coverage starts from all raw supported game-market observations; valid
 paired-state coverage and canonical quote eligibility are separate later
-stages. Model 4 is not fitted unless its movement sufficiency gate passes.
+stages. Main and movement sufficiency gates are independent: Model 4 and its
+matched Model-3 movement cohort may run when the movement gate passes even if
+the main benchmark is insufficient, and Model 4 is never fitted when that
+movement gate fails.
 Threshold entries explicitly distinguish settled, unsettled, and invalid
 settlement status; only settled entries enter threshold ROI. Pair-audit checks
 run in prerequisite order so malformed gaps are not mislabeled as share errors.
