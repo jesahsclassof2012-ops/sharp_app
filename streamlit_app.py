@@ -683,9 +683,14 @@ def render_market_state_research() -> None:
     st.subheader("Model readiness")
     for name in ("T-6h", "T-3h", "T-1h"):
         state = data["readiness"][name]
-        st.markdown(f"**{name}** — MAIN: {readiness_label(state['main'])}; MOVEMENT: {readiness_label(state['movement'])}")
-        failures = [*state["main"]["failures"], *state["movement"]["failures"]]
-        if failures: st.caption(readable_failures(list(dict.fromkeys(failures))))
+        st.markdown(f"**{name}**")
+        for label, gate, movement in (("MAIN", state["main"], False), ("MOVEMENT", state["movement"], True)):
+            st.caption(f"{label} — {readiness_label(gate)}")
+            if gate["failures"]:
+                messages = readable_failures(gate["failures"])
+                if movement:
+                    messages = messages.replace("Not enough settled games", "Not enough movement-qualified settled games").replace("Not enough win/loss rows", "Not enough movement-qualified win/loss rows")
+                st.caption(messages)
     horizon = st.selectbox("Recent landmark horizon", ["T-6h", "T-3h", "T-1h"], key="recent_landmark_horizon")
     st.subheader("Recent settled landmark observations")
     recent = market_state_recent_rows(data["by_horizon"][horizon])
