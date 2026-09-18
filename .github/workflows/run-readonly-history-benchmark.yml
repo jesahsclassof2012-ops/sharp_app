@@ -1,0 +1,32 @@
+name: Run read-only production-history benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run safety and regression tests
+        run: pytest -q
+      - name: Run aggregate read-only benchmark
+        env:
+          READONLY_DATABASE_URL: ${{ secrets.READONLY_DATABASE_URL }}
+        run: python analysis/readonly_history_benchmark.py
+      - name: Upload aggregate research report
+        uses: actions/upload-artifact@v4
+        with:
+          name: readonly-history-benchmark
+          path: analysis/output/readonly_history_benchmark.md
+          if-no-files-found: error
+          retention-days: 7
