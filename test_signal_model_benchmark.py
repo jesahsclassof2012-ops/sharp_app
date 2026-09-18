@@ -7,6 +7,7 @@ from analysis.signal_model_benchmark import (
     direction_reversal_audit, threshold_lock_entries,
 )
 from history_store import game_key, signal_key
+from analysis import readonly_history_benchmark as readonly
 
 
 def snapshot(**changes):
@@ -111,6 +112,15 @@ def test_market_state_rejects_incomplete_duplicate_and_nonzero_sum_pairs():
     assert nonzero["zero_sum_failures"] == 1
 
 
+def test_market_state_rejects_bad_percentages_gap_identity_and_data_quality():
+    first, second = paired_state()
+    cases = ((dict(first, bets_pct=-1), second), (dict(first, money_pct=101), second), (dict(first, money_minus_bets_gap=19), second), (dict(first, data_quality="invalid_total"), second), (first, dict(second, event_start_utc="2026-01-02T21:00:00Z")))
+    for left, right in cases:
+        states, audit = build_market_states([left, right])
+        assert states == []
+        assert audit["malformed_pairs"] + audit["data_quality_failures"] == 1
+
+
 def test_landmarks_are_backward_only_and_choose_latest_usable_quote():
     usable = paired_state(observed="2026-01-02T16:30:00Z")
     unusable = paired_state(observed="2026-01-02T16:50:00Z", canonical_price=None)
@@ -137,6 +147,19 @@ def test_canonical_landmark_settlement_and_separate_horizons():
     assert all(row["selection_side"] == "away" and row["outcome"] == "win" for row in rows)
 
 
+def test_landmark_research_identity_preserves_raw_identity_for_canonical_close():
+    entry_pair = paired_state(observed="2026-01-02T17:00:00Z")
+    close_pair = paired_state(observed="2026-01-02T19:00:00Z")
+    states, _ = build_market_states([*entry_pair, *close_pair])
+    rows, _ = landmark_decision_rows(states, [{"game_key": entry_pair[0]["game_key"], "away_score": 24, "home_score": 20}])
+    target = next(row for row in rows if row["landmark_horizon_minutes"] == 180)
+    target["raw_canonical_signal_key"] = entry_pair[0]["signal_key"]
+    attached = readonly.attach_captured_clv([target], [*entry_pair, *close_pair])[0]
+    assert attached["research_row_key"].endswith("T-180")
+    assert attached["raw_canonical_signal_key"] == entry_pair[0]["signal_key"]
+    assert attached["clv"] is not None
+
+
 def test_raw_flips_and_threshold_material_reversals_keep_regimes_through_zero():
     rows = []
     for index, gap in enumerate((15, 3, 0, -2, -8, 9)):
@@ -160,6 +183,34 @@ def test_threshold_lock_policy_skips_nonexecutable_then_locks_once_and_records_r
     entries, audit = threshold_lock_entries(states, [{"game_key": raw[0]["game_key"], "away_score": 24, "home_score": 20}], thresholds=(5,))
     assert len(entries) == 1 and entries[0]["entry_side"] == "canonical" and entries[0]["later_threshold_reversal"]
     assert audit["non_executable_qualifying_states"] == 1 and audit["locked_entries"] == 1
+
+
+def test_threshold_coverage_is_sequential_and_anchor_is_not_an_entry():
+    start = "2026-01-02T20:00:00Z"
+    anchor = paired_state(observed="2026-01-01T19:40:00Z", gap=12)
+    entry = paired_state(observed="2026-01-01T20:00:00Z", gap=12)
+    later_gap = paired_state(observed="2026-01-01T21:30:00Z", gap=2)
+    raw = [dict(row, event_start_utc=start) for row in [*anchor, *entry, *later_gap]]
+    states, _ = build_market_states(raw)
+    entries, _ = threshold_lock_entries(states, [{"game_key": raw[0]["game_key"], "away_score": 24, "home_score": 20}], thresholds=(10,))
+    assert len(entries) == 1 and entries[0]["decision_timestamp"] == "2026-01-01T20:00:00Z"
+
+
+def test_pre_entry_gap_blocks_entry_and_reversal_requires_opposite_threshold():
+    start = "2026-01-02T20:00:00Z"
+    anchor = paired_state(observed="2026-01-01T20:00:00Z", gap=2)
+    after_gap = paired_state(observed="2026-01-01T21:31:00Z", gap=20)
+    raw = [dict(row, event_start_utc=start) for row in [*anchor, *after_gap]]
+    states, _ = build_market_states(raw)
+    entries, audit = threshold_lock_entries(states, [], thresholds=(5,))
+    assert entries == [] and audit["gap_censored_before_entry"] == 1
+    # Explicit threshold magnitude: a -2 response cannot reverse a +20 entry.
+    mid = paired_state(observed="2026-01-01T20:30:00Z", gap=20)
+    low_opposite = paired_state(observed="2026-01-01T21:00:00Z", gap=-2)
+    raw = [dict(row, event_start_utc=start) for row in [*anchor, *mid, *low_opposite]]
+    states, _ = build_market_states(raw)
+    entries, _ = threshold_lock_entries(states, [], thresholds=(5,))
+    assert entries[0]["later_threshold_reversal"] is False
 
 
 def test_one_baseline_decision_and_push_binary_exclusion():

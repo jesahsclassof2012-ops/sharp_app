@@ -60,10 +60,11 @@ provenance.
 Code-path classification: **full parsed-provider-card population**, subject to
 whatever markets/cards the upstream consensus page exposes. It is not a complete
 all-sportsbook board. Actual production-history completeness was not verified
-because read-only production database access was unavailable. A benchmark on
-baseline decisions is conditional on the current positive-gap/executable
-selection universe and cannot establish effects for filtered-out sides,
-zero/negative gaps, or the complete market.
+because read-only production database access was unavailable. The market-state
+benchmark uses paired provider-card observations, a fixed canonical target, and
+fixed backward-only landmarks with canonical-quote eligibility. The legacy
+positive-selection baseline is retained only as an audit; neither design can
+establish effects for the complete sportsbook market.
 
 ## Stored fields and provenance
 

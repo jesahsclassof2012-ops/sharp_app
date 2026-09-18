@@ -156,11 +156,19 @@ def test_report_renders_complete_aggregate_sections_and_provenance_wording():
         "diagnostics": {"sport": {"minimum_rows": 20, "buckets": {"NFL": {"bets": 20}}, "suppressed_bucket_rows": {}}},
     }
     report = benchmark.render_report({"total_snapshots": 100, "result_coverage_by_sport": {"NFL": {"settled_games": 20}}}, benchmark_data)
-    for heading in ("Market-state pair audit", "Legacy per-selection baseline audit", "Direction-flip / material-reversal audit", "Landmark coverage", "OOS models by landmark", "Threshold-strategy observation coverage", "Threshold lock-policy economics", "Fold-by-fold OOS metrics", "Calibration buckets", "Fixed predicted-edge bucket economics", "Game-clustered ROI uncertainty", "Diagnostic breakdowns"):
+    for heading in ("Market-state pair audit", "Legacy per-selection baseline audit", "Direction-flip / material-reversal audit", "Landmark coverage", "Threshold-strategy observation coverage", "Threshold lock-policy economics", "Fold-by-fold OOS metrics", "Calibration buckets", "Fixed predicted-edge bucket economics", "Game-clustered ROI uncertainty", "Diagnostic breakdowns"):
         assert heading in report
     assert "one-sided implied market probability" in report
     assert "same-book paired-price provenance: **unavailable**" in report
     assert "official sportsbook closing line" in report
+
+
+def test_horizon_keyed_report_has_no_pooled_benchmark_sections():
+    gates = {"passed": False, "failures": ["binary W/L rows"]}
+    benchmark_data = {"by_landmark": {"T-360m": {"main_gate": gates, "movement_gate": gates, "models": {}, "comparisons": {}, "fold_metrics": [], "calibration": {}, "edge_buckets": {}, "roi_uncertainty": {}, "uncertainty": {}, "diagnostics": {}}, "T-180m": {"main_gate": gates, "movement_gate": gates, "models": {}, "comparisons": {}, "fold_metrics": [], "calibration": {}, "edge_buckets": {}, "roi_uncertainty": {}, "uncertainty": {}, "diagnostics": {}}}}
+    report = benchmark.render_report({}, benchmark_data)
+    assert "## Sufficiency by landmark" in report and "T-360m" in report and "T-180m" in report
+    assert "## Sufficiency\n" not in report
 
 
 def test_market_state_report_sections_remain_aggregate_only():

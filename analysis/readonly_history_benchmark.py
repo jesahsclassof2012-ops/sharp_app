@@ -168,7 +168,9 @@ def attach_captured_clv(entries: list[dict[str, Any]], snapshots: Iterable[dict[
     output = []
     for entry in entries:
         item = dict(entry)
-        candidates = by_signal.get(entry["signal_key"], [])
+        # Landmark research identity is deliberately distinct from raw canonical
+        # selection identity used to locate the captured canonical close.
+        candidates = by_signal.get(entry.get("raw_canonical_signal_key") or entry.get("signal_key"), [])
         close = max(candidates, key=lambda row: row["observed_at_utc"]) if candidates else None
         if close and close["observed_at_utc"] > entry["decision_timestamp"]:
             item["clv"] = calculate_clv(
@@ -274,8 +276,9 @@ def sufficiency_gate(entries: list[dict[str, Any]], movement: bool = False) -> d
 
 def _bootstrap_deltas(predictions: dict[str, list[dict[str, Any]]], challenger: str, baseline: str, seed: int = 20260917, rounds: int = 200) -> dict[str, Any] | None:
     """Game-clustered bootstrap for matched OOS model metrics."""
-    by_key = {(row["fold"], row["signal_key"]): row for row in predictions.get(baseline, [])}
-    pairs = [(base, row) for key, row in {(item["fold"], item["signal_key"]): item for item in predictions.get(challenger, [])}.items() if (base := by_key.get(key))]
+    identity = lambda row: row.get("research_row_key") or row.get("signal_key")
+    by_key = {(row["fold"], identity(row)): row for row in predictions.get(baseline, [])}
+    pairs = [(base, row) for key, row in {(item["fold"], identity(item)): item for item in predictions.get(challenger, [])}.items() if (base := by_key.get(key))]
     games: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = defaultdict(list)
     for pair in pairs: games[pair[0]["game_key"]].append(pair)
     if len(games) < 20: return None
@@ -300,6 +303,27 @@ def _groups(rows: Iterable[dict[str, Any]], key):
     for row in rows:
         grouped[str(key(row) if key(row) is not None else "missing")].append(row)
     return grouped
+
+
+def _legacy_breakdown(rows: list[dict[str, Any]], field: str) -> dict[str, Any]:
+    """Aggregate legacy positive-selection multiplicity without raw identities."""
+    output = {}
+    for value, group in _groups(rows, lambda row: row.get(field)).items():
+        markets = _groups(group, lambda row: (row.get("game_key"), row.get("market")))
+        dual = sum(len(items) >= 2 for items in markets.values())
+        output[value] = {"settled_game_markets": len(markets), "one_positive_legacy_side": sum(len(items) == 1 for items in markets.values()), "two_opposite_positive_legacy_sides": dual, "dual_side_pct": 100 * dual / len(markets) if markets else 0.0}
+    return output
+
+
+def _reversal_breakdown(states: list[dict[str, Any]], field: str) -> dict[str, Any]:
+    """Aggregate flip/reversal rates by sport or market only."""
+    output = {}
+    for value, group in _groups(states, lambda row: row.get(field)).items():
+        series = direction_reversal_audit(group)
+        count = len(series); raw = sum(item["raw_flip_count"] for item in series.values())
+        output[value] = {"series_count": count, "series_with_raw_flip": sum(item["raw_flip_count"] > 0 for item in series.values()), "raw_flip_count": raw, "raw_flip_rate": raw / count if count else 0.0,
+                         "material": {str(threshold): {"series_with_reversal": sum(item["material"][threshold]["count"] > 0 for item in series.values()), "reversal_count": sum(item["material"][threshold]["count"] for item in series.values()), "reversal_rate": sum(item["material"][threshold]["count"] > 0 for item in series.values()) / count if count else 0.0} for threshold in (5, 10, 15, 20)}}
+    return output
 
 
 def _economic_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -379,8 +403,9 @@ def diagnostic_breakdowns(rows: list[dict[str, Any]], minimum_rows: int = MIN_DI
 
 
 def _matched_predictions(predictions: dict[str, list[dict[str, Any]]], challenger: str, baseline: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    base_by_key = {(row["fold"], row["signal_key"]): row for row in predictions.get(baseline, [])}
-    pairs = [(base_by_key[key], row) for key, row in {(item["fold"], item["signal_key"]): item for item in predictions.get(challenger, [])}.items() if key in base_by_key]
+    identity = lambda row: row.get("research_row_key") or row.get("signal_key")
+    base_by_key = {(row["fold"], identity(row)): row for row in predictions.get(baseline, [])}
+    pairs = [(base_by_key[key], row) for key, row in {(item["fold"], identity(item)): item for item in predictions.get(challenger, [])}.items() if key in base_by_key]
     return [pair[0] for pair in pairs], [pair[1] for pair in pairs]
 
 
@@ -453,6 +478,25 @@ def benchmark_if_sufficient(entries: list[dict[str, Any]]) -> dict[str, Any]:
 def render_report(audit: dict[str, Any], benchmark: dict[str, Any]) -> str:
     """Render aggregates only; do not include source rows, matchups, or a DSN."""
     safe_audit = _redact_sensitive({key: value for key, value in audit.items() if key in REPORT_AUDIT_KEYS})
+    landmarks = benchmark.get("by_landmark")
+    if landmarks:
+        # A production report must never create a pooled headline from the
+        # three predeclared decision times.
+        sufficiency = {name: {key: value.get(key, {}) for key in ("main_gate", "movement_gate")} for name, value in landmarks.items()}
+        models = {name: value.get("models", {}) for name, value in landmarks.items()}
+        comparisons = {name: value.get("comparisons", {}) for name, value in landmarks.items()}
+        fold_metrics = {name: value.get("fold_metrics", []) for name, value in landmarks.items()}
+        calibration = {name: value.get("calibration", {}) for name, value in landmarks.items()}
+        edges = {name: value.get("edge_buckets", {}) for name, value in landmarks.items()}
+        roi = {name: value.get("roi_uncertainty", {}) for name, value in landmarks.items()}
+        uncertainty = {name: value.get("uncertainty", {}) for name, value in landmarks.items()}
+        diagnostics = {name: value.get("diagnostics", {}) for name, value in landmarks.items()}
+        suffix = " by landmark"
+    else:
+        sufficiency = {key: {"passed": value["passed"], "failures": value["failures"]} for key, value in (("main", benchmark["main_gate"]), ("movement", benchmark["movement_gate"]))}
+        models, comparisons = benchmark.get("models", {}), benchmark.get("comparisons", {})
+        fold_metrics, calibration, edges = benchmark.get("fold_metrics", []), benchmark.get("calibration", {}), benchmark.get("edge_buckets", {})
+        roi, uncertainty, diagnostics, suffix = benchmark.get("roi_uncertainty", {}), benchmark.get("uncertainty", {}), benchmark.get("diagnostics", {}), ""
     return "\n".join((
         "# Read-only production-history benchmark",
         "", "## Safety", "- Reader role and read-only session verified before SELECT queries.",
@@ -460,22 +504,21 @@ def render_report(audit: dict[str, Any], benchmark: dict[str, Any]) -> str:
         "- Market baseline is **one-sided implied market probability**, not no-vig.",
         "- Defensible same-book paired-price provenance: **unavailable** in the current stored schema.",
         "- Captured-close CLV, where available, is not an official sportsbook closing line.",
-        "", "## Population limitation", "The stored population is the application's provider-card collection path. Baseline decisions are selection-conditioned on executable positive-gap entries and do not represent a complete sportsbook board.",
+        "", "## Population limitation", "The stored population is the application's provider-card collection path. Primary research uses paired market states, fixed canonical targets, and fixed backward-only landmarks; legacy positive-selection baselines are audit-only. It does not represent a complete sportsbook board.",
         "", "## Audit", "```json", json.dumps(safe_audit, indent=2, sort_keys=True), "```",
         "", "## Market-state pair audit", "```json", json.dumps(_redact_sensitive(audit.get("market_state_pair_audit", {})), indent=2, sort_keys=True), "```",
         "", "## Legacy per-selection baseline audit", "Legacy rows are audit-only and are excluded from primary market-state fitting.", "```json", json.dumps(_redact_sensitive(audit.get("legacy_per_selection_baseline_audit", {})), indent=2, sort_keys=True), "```",
         "", "## Direction-flip / material-reversal audit", "Direction flips use the prior non-zero sign. Material reversals require the opposite 5/10/15/20pp threshold regime.", "```json", json.dumps(_redact_sensitive(audit.get("reversal_audit", {})), indent=2, sort_keys=True), "```",
         "", "## Landmark coverage", "T-6h, T-3h, and T-1h are separate backward-only cohorts; no post-target state is used.", "```json", json.dumps(_redact_sensitive(audit.get("landmark_coverage", {})), indent=2, sort_keys=True), "```",
-        "", "## Sufficiency", "```json", json.dumps({key: {"passed": value["passed"], "failures": value["failures"]} for key, value in (("main", benchmark["main_gate"]), ("movement", benchmark["movement_gate"]))}, indent=2), "```",
-        "", "## Out-of-sample benchmark", "```json", json.dumps(benchmark.get("models", {}), indent=2, sort_keys=True), "```",
-        "", "## Matched model comparisons", "```json", json.dumps(benchmark.get("comparisons", {}), indent=2, sort_keys=True), "```",
-        "", "## Fold-by-fold OOS metrics", "```json", json.dumps(benchmark.get("fold_metrics", []), indent=2, sort_keys=True), "```",
-        "", "## Calibration buckets", "```json", json.dumps(benchmark.get("calibration", {}), indent=2, sort_keys=True), "```",
-        "", "## Fixed predicted-edge bucket economics", "Includes bets, wins, losses, pushes, units, ROI, win rate excluding pushes, predicted edge, and captured-close CLV where compatible.", "```json", json.dumps(benchmark.get("edge_buckets", {}), indent=2, sort_keys=True), "```",
-        "", "## Game-clustered ROI uncertainty", "```json", json.dumps(benchmark.get("roi_uncertainty", {}), indent=2, sort_keys=True), "```",
-        "", "## Uncertainty", "```json", json.dumps(benchmark.get("uncertainty", {}), indent=2, sort_keys=True), "```",
-        "", "## Diagnostic breakdowns", f"Only buckets with at least {MIN_DIAGNOSTIC_ROWS} OOS rows are displayed; smaller buckets are suppressed.", "```json", json.dumps(benchmark.get("diagnostics", {}), indent=2, sort_keys=True), "```",
-        "", "## OOS models by landmark", "Landmarks are reported separately and never pooled.", "```json", json.dumps(_redact_sensitive(benchmark.get("by_landmark", {})), indent=2, sort_keys=True), "```",
+        "", f"## Sufficiency{suffix}", "```json", json.dumps(sufficiency, indent=2, sort_keys=True), "```",
+        "", f"## Out-of-sample benchmark{suffix}", "```json", json.dumps(models, indent=2, sort_keys=True), "```",
+        "", f"## Matched model comparisons{suffix}", "```json", json.dumps(comparisons, indent=2, sort_keys=True), "```",
+        "", f"## Fold-by-fold OOS metrics{suffix}", "```json", json.dumps(fold_metrics, indent=2, sort_keys=True), "```",
+        "", f"## Calibration buckets{suffix}", "```json", json.dumps(calibration, indent=2, sort_keys=True), "```",
+        "", f"## Fixed predicted-edge bucket economics{suffix}", "Includes bets, wins, losses, pushes, units, ROI, win rate excluding pushes, predicted edge, and captured-close CLV where compatible.", "```json", json.dumps(edges, indent=2, sort_keys=True), "```",
+        "", f"## Game-clustered ROI uncertainty{suffix}", "```json", json.dumps(roi, indent=2, sort_keys=True), "```",
+        "", f"## Uncertainty{suffix}", "```json", json.dumps(uncertainty, indent=2, sort_keys=True), "```",
+        "", f"## Diagnostic breakdowns{suffix}", f"Only buckets with at least {MIN_DIAGNOSTIC_ROWS} OOS rows are displayed; smaller buckets are suppressed.", "```json", json.dumps(diagnostics, indent=2, sort_keys=True), "```",
         "", "## Threshold-strategy observation coverage", "First observed qualifying state is not a claim about an unobserved first crossing.", "```json", json.dumps(_redact_sensitive(audit.get("threshold_coverage", {})), indent=2, sort_keys=True), "```",
         "", "## Threshold lock-policy economics", "Only the first qualifying executable favored-side entry is locked; later reversals do not erase or replace it.", "```json", json.dumps(_redact_sensitive(audit.get("threshold_lock_economics", {})), indent=2, sort_keys=True), "```",
         "", "## Threshold reversal diagnostics", "```json", json.dumps(_redact_sensitive(audit.get("threshold_reversal_diagnostics", {})), indent=2, sort_keys=True), "```",
@@ -514,24 +557,28 @@ def run() -> dict[str, Any]:
         "settled_game_markets": len(legacy_groups),
         "one_legacy_positive_selection": sum(len(rows) == 1 for rows in legacy_groups.values()),
         "two_opposite_legacy_positive_selections": sum(len(rows) >= 2 for rows in legacy_groups.values()),
+        "dual_side_pct": 100 * sum(len(rows) >= 2 for rows in legacy_groups.values()) / len(legacy_groups) if legacy_groups else 0.0,
+        "by_sport": _legacy_breakdown(legacy, "sport"), "by_market": _legacy_breakdown(legacy, "market"),
     }
     reversal = direction_reversal_audit(states)
     audit["reversal_audit"] = {
         "series": len(reversal), "raw_flips": sum(value["raw_flip_count"] for value in reversal.values()),
         "material_reversals": {str(threshold): sum(value["material"][threshold]["count"] for value in reversal.values()) for threshold in (5, 10, 15, 20)},
+        "by_sport": _reversal_breakdown(states, "sport"), "by_market": _reversal_breakdown(states, "market"),
     }
     locked, threshold_audit = threshold_lock_entries(states, results)
     audit["threshold_coverage"] = threshold_audit
-    audit["threshold_lock_economics"] = _economic_summary(locked)
-    audit["threshold_reversal_diagnostics"] = {"locked_entries_with_later_threshold_reversal": sum(bool(row.get("later_threshold_reversal")) for row in locked)}
+    audit["threshold_lock_economics"] = {str(threshold): _economic_summary([row for row in locked if row.get("threshold") == threshold]) for threshold in (5, 10, 15, 20)}
+    audit["threshold_reversal_diagnostics"] = {status: sum(row.get("reversal_followup_status") == status for row in locked) for status in ("reversal_observed", "no_reversal_complete_followup", "reversal_followup_censored")}
     per_landmark = {}
     for horizon in (360, 180, 60):
         result = benchmark_if_sufficient([row for row in entries if row.get("landmark_horizon_minutes") == horizon])
         per_landmark[f"T-{horizon}m"] = {key: value for key, value in result.items() if key not in {"main_gate", "movement_gate"}}
         per_landmark[f"T-{horizon}m"]["main_gate"] = {key: result["main_gate"][key] for key in ("passed", "failures")}
         per_landmark[f"T-{horizon}m"]["movement_gate"] = {key: result["movement_gate"][key] for key in ("passed", "failures")}
-    benchmark = benchmark_if_sufficient(entries)
-    benchmark["by_landmark"] = per_landmark
+    # Never fit or report a pooled landmark model.  The top-level shape is
+    # horizon-keyed so a future caller cannot mistake it for one cohort.
+    benchmark = {"by_landmark": per_landmark}
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(render_report(audit, benchmark), encoding="utf-8")
     return {"audit": audit, "benchmark": benchmark}
