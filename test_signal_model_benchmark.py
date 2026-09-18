@@ -4,7 +4,7 @@ from analysis.signal_model_benchmark import (
     calibration_buckets, edge_bucket_performance, run_walk_forward_benchmark,
     select_training_edge_threshold, validated_no_vig_pair, build_market_states,
     select_landmark_states, market_state_movement, landmark_decision_rows,
-    direction_reversal_audit, threshold_lock_entries,
+    direction_reversal_audit, threshold_lock_entries, landmark_coverage_audit,
 )
 from history_store import game_key, signal_key
 from analysis import readonly_history_benchmark as readonly
@@ -141,6 +141,14 @@ def test_landmarks_are_backward_only_and_choose_latest_usable_quote():
     selected, coverage = select_landmark_states(states, horizons=(180,))
     assert len(selected) == 1 and selected[0]["observed_at_utc"] == "2026-01-02T16:30:00Z"
     assert coverage["T-180m"]["usable_landmark_rows"] == 1
+
+
+def test_landmark_coverage_uses_raw_universe_even_without_valid_pair():
+    valid = paired_state(observed="2026-01-02T16:30:00Z")
+    invalid = snapshot(game_key="raw-only", signal_key="raw-only", market="Spread", observed_at_utc="2026-01-02T16:30:00Z")
+    states, _ = build_market_states(valid)
+    coverage = landmark_coverage_audit([*valid, invalid], states, horizons=(180,))["T-180m"]
+    assert coverage["raw_game_markets_considered"] == 2 and coverage["no_valid_paired_state"] == 1 and coverage["usable_landmark_row"] == 1
 
 
 def test_market_movement_uses_prior_paired_state_without_quote_or_signal_identity():

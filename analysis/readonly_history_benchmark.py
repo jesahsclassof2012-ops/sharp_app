@@ -21,6 +21,7 @@ from analysis.signal_model_benchmark import (
     decision_rows,
     direction_reversal_audit,
     landmark_decision_rows,
+    landmark_coverage_audit,
     primary_model_eligible,
     run_walk_forward_benchmark,
     threshold_lock_entries,
@@ -348,10 +349,10 @@ def _economic_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _threshold_economic_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Threshold policy ROI uses only explicitly settled lock entries."""
-    settled = [row for row in rows if row.get("outcome") in {"win", "loss", "push"}]
-    invalid = [row for row in rows if row.get("outcome") not in {"win", "loss", "push", None}]
+    settled = [row for row in rows if row.get("settlement_status") == "settled" and row.get("outcome") in {"win", "loss", "push"}]
+    invalid = [row for row in rows if row.get("settlement_status") == "invalid"]
     summary = _economic_summary(settled)
-    summary.update({"locked_entries_total": len(rows), "settled_entries": len(settled), "unsettled_entries": sum(row.get("outcome") is None for row in rows), "invalid_settlement_entries": len(invalid)})
+    summary.update({"locked_entries_total": len(rows), "settled_entries": len(settled), "unsettled_entries": sum(row.get("settlement_status") == "unsettled" for row in rows), "invalid_settlement_entries": len(invalid)})
     return summary
 
 
@@ -458,12 +459,14 @@ def benchmark_if_sufficient(entries: list[dict[str, Any]]) -> dict[str, Any]:
     movement = sufficiency_gate(entries, movement=True)
     if not main["passed"]:
         return {"main_gate": main, "movement_gate": movement, "models": {}, "fold_metrics": [], "calibration": {}, "edge_buckets": {}, "uncertainty": {}, "roi_uncertainty": {}, "comparisons": {}, "diagnostics": {}}
-    result = run_walk_forward_benchmark(main["cohort"], folds=MAIN_GATES["folds"])
+    result = run_walk_forward_benchmark(main["cohort"], folds=MAIN_GATES["folds"], include_movement=False)
     models = {name: values for name, values in result["metrics"].items() if name != "Model 4" and name != "Model 3 movement cohort"}
-    if not movement["passed"]:
-        result["predictions"].pop("Model 4", None); result["predictions"].pop("Model 3 movement cohort", None)
-        models.pop("Model 4", None); models.pop("Model 3 movement cohort", None)
-    else:
+    if movement["passed"]:
+        movement_result = run_walk_forward_benchmark(movement["cohort"], folds=MOVEMENT_GATES["folds"], include_movement=True)
+        for name in ("Model 3 movement cohort", "Model 4"):
+            result["predictions"][name] = movement_result["predictions"].get(name, [])
+            result["metrics"][name] = movement_result["metrics"].get(name, {})
+        result["fold_metrics"].extend(row for row in movement_result["fold_metrics"] if row["model"] in {"Model 3 movement cohort", "Model 4"})
         models["Model 3 movement cohort"] = result["metrics"].get("Model 3 movement cohort", {})
         models["Model 4"] = result["metrics"].get("Model 4", {})
     uncertainty = {name: _bootstrap_deltas(result["predictions"], name, "Model 0B") for name in ("Model 1", "Model 2", "Model 3")}
@@ -561,7 +564,7 @@ def run() -> dict[str, Any]:
     legacy = decision_rows(snapshots, results)
     legacy_groups = _groups(legacy, lambda row: (row.get("game_key"), row.get("market")))
     audit["market_state_pair_audit"] = pair_audit
-    audit["landmark_coverage"] = landmark_coverage
+    audit["landmark_coverage"] = landmark_coverage_audit(snapshots, states)
     audit["legacy_per_selection_baseline_audit"] = {
         "settled_game_markets": len(legacy_groups),
         "one_legacy_positive_selection": sum(len(rows) == 1 for rows in legacy_groups.values()),

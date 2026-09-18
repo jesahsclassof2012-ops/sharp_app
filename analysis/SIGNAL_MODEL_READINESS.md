@@ -52,6 +52,13 @@ storage lacks defensible same-book paired-price provenance for no-vig pricing.
 These rules establish research readiness only; they make no profitability,
 predictive-value, or production-readiness claim.
 
+Landmark coverage starts from all raw supported game-market observations; valid
+paired-state coverage and canonical quote eligibility are separate later
+stages. Model 4 is not fitted unless its movement sufficiency gate passes.
+Threshold entries explicitly distinguish settled, unsettled, and invalid
+settlement status; only settled entries enter threshold ROI. Pair-audit checks
+run in prerequisite order so malformed gaps are not mislabeled as share errors.
+
 ## Data lineage and population
 
 Source-code inspection shows that `ScoresAndOdds consensus-picks HTML` is parsed

@@ -401,7 +401,7 @@ def primary_model_eligible(row: dict[str, Any]) -> bool:
     return model_features(row, "Model 3") is not None
 
 
-def run_walk_forward_benchmark(rows: Iterable[dict[str, Any]], folds: int = 3) -> dict[str, Any]:
+def run_walk_forward_benchmark(rows: Iterable[dict[str, Any]], folds: int = 3, include_movement: bool = True) -> dict[str, Any]:
     """Run fixed, chronological OOS models.  No test data informs fitting."""
     # Keep Models 0A–3 on exactly the same feature-complete rows in every fold.
     all_rows = [row for row in rows if primary_model_eligible(row)]
@@ -417,14 +417,15 @@ def run_walk_forward_benchmark(rows: Iterable[dict[str, Any]], folds: int = 3) -
             for row in predicted: row["fold"] = fold_id; row["model"] = model
             predictions[model].extend(predicted); metrics = binary_metrics(predicted, "prediction")
             fold_metrics.append({"model": model, "fold": fold_id, **metrics})
-        movement_train = [row for row in train if row.get("movement_60m") is not None]
-        movement_test = [row for row in test if row.get("movement_60m") is not None]
-        for model in ("Model 3 movement cohort", "Model 4"):
-            source = "Model 3" if model.startswith("Model 3") else model
-            predicted = _fit_predict(movement_train, movement_test, source)
-            for row in predicted: row["fold"] = fold_id; row["model"] = model
-            predictions[model].extend(predicted); metrics = binary_metrics(predicted, "prediction")
-            fold_metrics.append({"model": model, "fold": fold_id, **metrics})
+        if include_movement:
+            movement_train = [row for row in train if row.get("movement_60m") is not None]
+            movement_test = [row for row in test if row.get("movement_60m") is not None]
+            for model in ("Model 3 movement cohort", "Model 4"):
+                source = "Model 3" if model.startswith("Model 3") else model
+                predicted = _fit_predict(movement_train, movement_test, source)
+                for row in predicted: row["fold"] = fold_id; row["model"] = model
+                predictions[model].extend(predicted); metrics = binary_metrics(predicted, "prediction")
+                fold_metrics.append({"model": model, "fold": fold_id, **metrics})
     metrics = {model: binary_metrics(values, "prediction") for model, values in predictions.items()}
     baseline = metrics.get("Model 0B", {})
     for model, values in metrics.items():
@@ -468,27 +469,26 @@ def build_market_states(snapshots: Iterable[dict[str, Any]]) -> tuple[list[dict[
             continue
         canonical, opposite = sides[canonical_side][0], sides[opposite_side][0]
         canonical_gap, opposite_gap = _gap(canonical), _gap(opposite)
-        try:
-            _time(canonical["event_start_utc"])
-            valid_shares = all(value is not None for value in (canonical.get("bets_pct"), canonical.get("money_pct"), opposite.get("bets_pct"), opposite.get("money_pct")))
-        except (KeyError, TypeError, ValueError):
-            valid_shares = False
         if canonical.get("data_quality", "OK") != "OK" or opposite.get("data_quality", "OK") != "OK":
             audit["data_quality_failures"] += 1
             continue
+        identity_consistent = canonical.get("event_start_utc") == opposite.get("event_start_utc") and (not canonical.get("sport") or not opposite.get("sport") or canonical.get("sport") == opposite.get("sport")) and (not canonical.get("matchup") or not opposite.get("matchup") or canonical.get("matchup") == opposite.get("matchup"))
         try:
-            range_valid = all(0 <= float(value) <= 100 for value in (canonical.get("bets_pct"), canonical.get("money_pct"), opposite.get("bets_pct"), opposite.get("money_pct")))
-            stored_consistent = abs(canonical_gap - (float(canonical["money_pct"]) - float(canonical["bets_pct"]))) <= SPLIT_GAP_VALUE_TOLERANCE and abs(opposite_gap - (float(opposite["money_pct"]) - float(opposite["bets_pct"]))) <= SPLIT_GAP_VALUE_TOLERANCE
-            shares_complementary = abs(float(canonical["bets_pct"]) + float(opposite["bets_pct"]) - 100) <= SPLIT_SHARE_SUM_TOLERANCE and abs(float(canonical["money_pct"]) + float(opposite["money_pct"]) - 100) <= SPLIT_SHARE_SUM_TOLERANCE
-            identity_consistent = canonical.get("event_start_utc") == opposite.get("event_start_utc") and (not canonical.get("sport") or not opposite.get("sport") or canonical.get("sport") == opposite.get("sport")) and (not canonical.get("matchup") or not opposite.get("matchup") or canonical.get("matchup") == opposite.get("matchup"))
+            shares = [float(value) for value in (canonical.get("bets_pct"), canonical.get("money_pct"), opposite.get("bets_pct"), opposite.get("money_pct"))]
         except (TypeError, ValueError):
-            range_valid = stored_consistent = identity_consistent = shares_complementary = False
+            audit["malformed_pairs"] += 1; continue
+        if not identity_consistent or not all(0 <= value <= 100 for value in shares):
+            audit["malformed_pairs"] += 1; continue
+        shares_complementary = abs(shares[0] + shares[2] - 100) <= SPLIT_SHARE_SUM_TOLERANCE and abs(shares[1] + shares[3] - 100) <= SPLIT_SHARE_SUM_TOLERANCE
         if not shares_complementary:
             audit["share_sum_failures"] += 1
             continue
-        if canonical_gap is None or opposite_gap is None or not valid_shares or not range_valid or not stored_consistent or not identity_consistent:
+        if canonical_gap is None or opposite_gap is None:
             audit["malformed_pairs"] += 1
             continue
+        stored_consistent = abs(canonical_gap - (shares[1] - shares[0])) <= SPLIT_GAP_VALUE_TOLERANCE and abs(opposite_gap - (shares[3] - shares[2])) <= SPLIT_GAP_VALUE_TOLERANCE
+        if not stored_consistent:
+            audit["malformed_pairs"] += 1; continue
         if abs(canonical_gap + opposite_gap) > MARKET_GAP_SUM_TOLERANCE:
             audit["zero_sum_failures"] += 1
             continue
@@ -553,6 +553,28 @@ def select_landmark_states(states: Iterable[dict[str, Any]], horizons: Iterable[
             selected.append(row); counts["usable_landmark_rows"] += 1
         audit[f"T-{horizon}m"] = counts
     return selected, audit
+
+
+def landmark_coverage_audit(raw_snapshots: Iterable[dict[str, Any]], states: Iterable[dict[str, Any]], horizons: Iterable[int] = LANDMARK_HORIZONS_MINUTES) -> dict[str, dict[str, int]]:
+    """Classify every raw supported game-market, even if no valid pair survived."""
+    raw_groups = _grouped((row for row in raw_snapshots if row.get("market") in CANONICAL_SIDES and row.get("game_key")), lambda row: (row["game_key"], row["market"]))
+    valid_groups = _grouped(states, lambda row: (row["game_key"], row["market"]))
+    output = {}
+    for horizon in horizons:
+        counts = {"raw_game_markets_considered": len(raw_groups), "no_valid_paired_state": 0, "valid_paired_state_only_after_target": 0, "valid_paired_state_before_target_but_stale": 0, "valid_paired_state_in_45m_window": 0, "paired_state_in_window_but_no_usable_canonical_quote": 0, "usable_landmark_row": 0}
+        for key, raw in raw_groups.items():
+            valid = valid_groups.get(key, [])
+            if not valid: counts["no_valid_paired_state"] += 1; continue
+            target = _time(raw[0]["event_start_utc"]).timestamp() - horizon * 60
+            prior = [row for row in valid if _time(row["observed_at_utc"]).timestamp() <= target]
+            if not prior: counts["valid_paired_state_only_after_target"] += 1; continue
+            window = [row for row in prior if _time(row["observed_at_utc"]).timestamp() >= target - LANDMARK_MAX_STALENESS_MINUTES * 60]
+            if not window: counts["valid_paired_state_before_target_but_stale"] += 1; continue
+            counts["valid_paired_state_in_45m_window"] += 1
+            if not any(_quote_usable(row, "canonical") for row in window): counts["paired_state_in_window_but_no_usable_canonical_quote"] += 1
+            else: counts["usable_landmark_row"] += 1
+        output[f"T-{horizon}m"] = counts
+    return output
 
 
 def market_state_movement(current: dict[str, Any], states: Iterable[dict[str, Any]]) -> float | None:
@@ -662,10 +684,11 @@ def threshold_lock_entries(states: Iterable[dict[str, Any]], results: Iterable[d
                 else: policy["no_entry_complete_coverage"] += 1
                 continue
             state, side = locked; source = state[f"{side}_row"]; result = scores.get(state["game_key"])
-            item = dict(source); item.update({"threshold": threshold, "entry_side": side, "decision_timestamp": state["observed_at_utc"], "signed_gap": state["signed_gap"], "locked": True})
-            if result:
+            item = dict(source); item.update({"threshold": threshold, "entry_side": side, "decision_timestamp": state["observed_at_utc"], "signed_gap": state["signed_gap"], "locked": True, "outcome": None, "settlement_status": "unsettled"})
+            if result is not None:
                 try: item["outcome"] = settle_selection(state["market"], source.get("selection_side") or "", line_value(source.get("best_line")), result["away_score"], result["home_score"])
-                except (KeyError, TypeError, ValueError): item["outcome"] = None
+                except (KeyError, TypeError, ValueError): item["settlement_status"] = "invalid"
+                else: item["settlement_status"] = "settled" if item["outcome"] in {"win", "loss", "push"} else "invalid"
             post = [row for row in observed if _time(row["observed_at_utc"]) > _time(state["observed_at_utc"])]
             entry_gap = float(state["signed_gap"])
             later = [row for row in post if (entry_gap > 0 and float(row["signed_gap"]) <= -threshold) or (entry_gap < 0 and float(row["signed_gap"]) >= threshold)]
