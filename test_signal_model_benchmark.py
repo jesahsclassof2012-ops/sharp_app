@@ -2,9 +2,13 @@ from analysis.signal_model_benchmark import (
     binary_metrics, chronological_game_folds, decision_rows, derived_split_features,
     edge_bucket, expected_value, leakage_safe_movement, no_vig_probability,
     calibration_buckets, edge_bucket_performance, run_walk_forward_benchmark,
-    select_training_edge_threshold, validated_no_vig_pair,
+    select_training_edge_threshold, validated_no_vig_pair, build_market_states,
+    select_landmark_states, market_state_movement, landmark_decision_rows,
+    direction_reversal_audit, threshold_lock_entries, landmark_coverage_audit,
 )
 from history_store import game_key, signal_key
+from analysis import readonly_history_benchmark as readonly
+from analysis import signal_model_benchmark
 
 
 def snapshot(**changes):
@@ -73,6 +77,211 @@ def test_diagnostics_are_raw_gap_and_safe_at_percentage_boundaries():
     values = derived_split_features(snapshot(bets_pct=40, money_pct=60))
     assert values["raw_gap"] == 20 and values["log_relative_wager_ratio"] is not None
     assert derived_split_features(snapshot(bets_pct=0, money_pct=60))["relative_wager_ratio"] is None
+
+
+def paired_state(*, market="Spread", observed="2026-01-02T17:00:00Z", gap=20, canonical_price=-110, opposite_price=-110):
+    canonical_side, opposite_side = ("over", "under") if market == "Total" else ("away", "home")
+    canonical_selection, opposite_selection = ("Over", "Under") if market == "Total" else ("A", "B")
+    canonical_line, opposite_line = ("o45.5", "u45.5") if market == "Total" else ("+3", "-3")
+    first = snapshot(market=market, selection=canonical_selection, selection_side=canonical_side,
+                     observed_at_utc=observed, bets_pct=40, money_pct=40 + gap,
+                     money_minus_bets_gap=gap, best_line=canonical_line, best_price=canonical_price)
+    second = snapshot(market=market, selection=opposite_selection, selection_side=opposite_side,
+                      observed_at_utc=observed, bets_pct=60, money_pct=60 - gap,
+                      money_minus_bets_gap=-gap, best_line=opposite_line, best_price=opposite_price)
+    return first, second
+
+
+def test_market_states_pair_orientation_validity_and_quote_independence():
+    rows = list(paired_state()) + list(paired_state(market="Total", observed="2026-01-02T17:05:00Z", gap=-12, canonical_price=None))
+    states, audit = build_market_states(rows)
+    assert len(states) == 2 and audit["valid_split_states"] == 2
+    spread, total = states
+    assert spread["canonical_selection_side"] == "away" and spread["signed_gap"] == 20 and spread["favored_side"] == "canonical"
+    assert total["canonical_selection_side"] == "over" and total["signed_gap"] == -12 and total["favored_side"] == "opposite"
+    assert total["canonical_best_price"] is None  # valid split state, unavailable quote
+
+
+def test_market_state_rejects_incomplete_duplicate_and_nonzero_sum_pairs():
+    first, second = paired_state()
+    _, incomplete = build_market_states([first])
+    _, duplicate = build_market_states([first, dict(first, selection="C")])
+    bad = dict(second, money_minus_bets_gap=-19, money_pct=41)
+    _, nonzero = build_market_states([first, bad])
+    assert incomplete["incomplete_pairs"] == 1
+    assert duplicate["incomplete_pairs"] + duplicate["duplicate_sides"] == 1
+    assert nonzero["zero_sum_failures"] == 1
+
+
+def test_market_state_rejects_bad_percentages_gap_and_identity():
+    first, second = paired_state()
+    cases = ((dict(first, bets_pct=-1), second), (dict(first, money_pct=101), second), (dict(first, money_minus_bets_gap=19), second), (first, dict(second, event_start_utc="2026-01-02T21:00:00Z")))
+    for left, right in cases:
+        states, audit = build_market_states([left, right])
+        assert states == []
+        assert audit["malformed_pairs"] + audit["share_sum_failures"] == 1
+
+
+def test_non_ok_quote_quality_is_audit_only_for_structurally_valid_split_states():
+    canonical, opposite = paired_state(canonical_price=None)
+    canonical["data_quality"] = "invalid odds"
+    states, audit = build_market_states([canonical, opposite])
+    assert len(states) == audit["valid_split_states"] == 1
+    assert audit["non_ok_data_quality_pairs"] == audit["canonical_non_ok_data_quality"] == 1
+    assert audit["opposite_non_ok_data_quality"] == 0
+    assert audit["canonical_executable_quote_missing"] == audit["opposite_executable_quote_available"] == 1
+    assert signal_model_benchmark._quote_usable(states[0], "canonical") is False
+    invalid_price, valid_opposite = paired_state(canonical_price="N/A")
+    invalid_price["data_quality"] = "invalid odds"
+    invalid_states, _ = build_market_states([invalid_price, valid_opposite])
+    assert len(invalid_states) == 1 and signal_model_benchmark._quote_usable(invalid_states[0], "canonical") is False
+
+
+def test_both_missing_quote_quality_and_total_quote_quality_remain_structural_history():
+    first, second = paired_state(canonical_price=None, opposite_price=None)
+    first["data_quality"] = second["data_quality"] = "invalid odds"
+    states, audit = build_market_states([first, second])
+    assert len(states) == 1 and audit["neither_executable"] == audit["non_ok_data_quality_pairs"] == 1
+    over, under = paired_state(market="Total", canonical_price=None, opposite_price=None)
+    over["data_quality"] = under["data_quality"] = "invalid odds; missing total"
+    total_states, total_audit = build_market_states([over, under])
+    assert len(total_states) == 1 and total_audit["neither_executable"] == 1
+    assert signal_model_benchmark._quote_usable(total_states[0], "canonical") is False
+
+
+def test_non_ok_quality_with_structural_corruption_is_rejected_by_structure():
+    first, second = paired_state()
+    first.update(bets_pct=120, data_quality="invalid percentage; invalid odds")
+    states, audit = build_market_states([first, second])
+    assert states == [] and audit["malformed_pairs"] == 1
+    assert audit["non_ok_data_quality_pairs"] == 0
+
+
+def test_complementary_share_tolerance_accepts_rounding_and_audits_failures():
+    first, second = paired_state()
+    for total in (99, 100, 101):
+        right = dict(second, bets_pct=total - first["bets_pct"], money_pct=total - first["money_pct"])
+        right["money_minus_bets_gap"] = right["money_pct"] - right["bets_pct"]
+        states, _ = build_market_states([first, right])
+        assert len(states) == 1
+    malformed = dict(second, bets_pct=30, money_pct=10, money_minus_bets_gap=-20)
+    states, audit = build_market_states([first, malformed])
+    assert states == [] and audit["share_sum_failures"] == 1
+
+
+def test_landmarks_are_backward_only_and_choose_latest_usable_quote():
+    usable = paired_state(observed="2026-01-02T16:30:00Z")
+    unusable = paired_state(observed="2026-01-02T16:50:00Z", canonical_price=None)
+    unusable[0]["data_quality"] = "invalid odds"
+    post_target = paired_state(observed="2026-01-02T17:05:00Z")
+    states, _ = build_market_states([*usable, *unusable, *post_target])
+    selected, coverage = select_landmark_states(states, horizons=(180,))
+    assert len(states) == 3 and len(selected) == 1 and selected[0]["observed_at_utc"] == "2026-01-02T16:30:00Z"
+    assert coverage["T-180m"]["valid_paired_state_in_window"] == coverage["T-180m"]["usable_landmark_rows"] == 1
+
+
+def test_landmark_coverage_uses_raw_universe_even_without_valid_pair():
+    valid = paired_state(observed="2026-01-02T16:30:00Z")
+    invalid = snapshot(game_key="raw-only", signal_key="raw-only", market="Spread", observed_at_utc="2026-01-02T16:30:00Z")
+    states, _ = build_market_states(valid)
+    coverage = landmark_coverage_audit([*valid, invalid], states, horizons=(180,))["T-180m"]
+    assert coverage["raw_game_markets_considered"] == 2 and coverage["no_valid_paired_state"] == 1 and coverage["usable_landmark_row"] == 1
+
+
+def test_market_movement_uses_prior_paired_state_without_quote_or_signal_identity():
+    prior = paired_state(observed="2026-01-02T16:00:00Z", gap=8, canonical_price=None)
+    prior[0]["data_quality"] = "invalid odds"
+    current = paired_state(observed="2026-01-02T17:00:00Z", gap=-5)
+    states, _ = build_market_states([*prior, *current])
+    assert market_state_movement(states[1], states) == -13
+    assert next(iter(direction_reversal_audit(states).values()))["raw_flip_count"] == 1
+
+
+def test_canonical_landmark_settlement_and_separate_horizons():
+    early = paired_state(observed="2026-01-02T14:00:00Z", market="Spread")
+    later = paired_state(observed="2026-01-02T17:00:00Z", market="Spread")
+    states, _ = build_market_states([*early, *later])
+    rows, _ = landmark_decision_rows(states, [{"game_key": early[0]["game_key"], "away_score": 24, "home_score": 20}])
+    assert {row["landmark_horizon_minutes"] for row in rows} == {360, 180}
+    assert all(row["selection_side"] == "away" and row["outcome"] == "win" for row in rows)
+
+
+def test_landmark_research_identity_preserves_raw_identity_for_canonical_close():
+    entry_pair = paired_state(observed="2026-01-02T17:00:00Z")
+    close_pair = paired_state(observed="2026-01-02T19:00:00Z")
+    states, _ = build_market_states([*entry_pair, *close_pair])
+    rows, _ = landmark_decision_rows(states, [{"game_key": entry_pair[0]["game_key"], "away_score": 24, "home_score": 20}])
+    target = next(row for row in rows if row["landmark_horizon_minutes"] == 180)
+    target["raw_canonical_signal_key"] = entry_pair[0]["signal_key"]
+    attached = readonly.attach_captured_clv([target], [*entry_pair, *close_pair])[0]
+    assert attached["research_row_key"].endswith("T-180")
+    assert attached["raw_canonical_signal_key"] == entry_pair[0]["signal_key"]
+    assert attached["clv"] is not None
+
+
+def test_raw_flips_and_threshold_material_reversals_keep_regimes_through_zero():
+    rows = []
+    for index, gap in enumerate((15, 3, 0, -2, -8, 9)):
+        stamp = f"2026-01-02T{12 + index:02}:00:00Z"
+        rows.extend(paired_state(observed=stamp, gap=gap))
+    states, _ = build_market_states(rows)
+    audit = next(iter(direction_reversal_audit(states).values()))
+    assert audit["raw_flip_count"] == 2
+    assert audit["material"][5]["count"] == 2
+    assert audit["material"][10]["count"] == 0
+
+
+def test_threshold_lock_policy_skips_nonexecutable_then_locks_once_and_records_reversal():
+    start = "2026-01-02T20:00:00Z"
+    anchor = paired_state(observed="2026-01-01T20:00:00Z", gap=2)
+    nonexec = paired_state(observed="2026-01-01T20:30:00Z", gap=10, canonical_price=None)
+    executable = paired_state(observed="2026-01-01T21:00:00Z", gap=10)
+    reversal = paired_state(observed="2026-01-01T21:30:00Z", gap=-12)
+    raw = [dict(row, event_start_utc=start) for row in [*anchor, *nonexec, *executable, *reversal]]
+    states, _ = build_market_states(raw)
+    entries, audit = threshold_lock_entries(states, [{"game_key": raw[0]["game_key"], "away_score": 24, "home_score": 20}], thresholds=(5,))
+    assert len(entries) == 1 and entries[0]["entry_side"] == "canonical" and entries[0]["later_threshold_reversal"]
+    assert audit["5"]["non_executable_qualifying_states"] == 1 and audit["5"]["locked_entries"] == 1
+
+
+def test_threshold_coverage_is_sequential_and_anchor_is_not_an_entry():
+    start = "2026-01-02T20:00:00Z"
+    anchor = paired_state(observed="2026-01-01T19:40:00Z", gap=12)
+    entry = paired_state(observed="2026-01-01T20:00:00Z", gap=12)
+    later_gap = paired_state(observed="2026-01-01T21:30:00Z", gap=2)
+    raw = [dict(row, event_start_utc=start) for row in [*anchor, *entry, *later_gap]]
+    states, _ = build_market_states(raw)
+    entries, _ = threshold_lock_entries(states, [{"game_key": raw[0]["game_key"], "away_score": 24, "home_score": 20}], thresholds=(10,))
+    assert len(entries) == 1 and entries[0]["decision_timestamp"] == "2026-01-01T20:00:00Z"
+
+
+def test_pre_entry_gap_blocks_entry_and_reversal_requires_opposite_threshold():
+    start = "2026-01-02T20:00:00Z"
+    anchor = paired_state(observed="2026-01-01T20:00:00Z", gap=2)
+    after_gap = paired_state(observed="2026-01-01T21:31:00Z", gap=20)
+    raw = [dict(row, event_start_utc=start) for row in [*anchor, *after_gap]]
+    states, _ = build_market_states(raw)
+    entries, audit = threshold_lock_entries(states, [], thresholds=(5,))
+    assert entries == [] and audit["5"]["gap_censored_before_entry"] == 1
+    # Explicit threshold magnitude: a -2 response cannot reverse a +20 entry.
+    mid = paired_state(observed="2026-01-01T20:30:00Z", gap=20)
+    low_opposite = paired_state(observed="2026-01-01T21:00:00Z", gap=-2)
+    raw = [dict(row, event_start_utc=start) for row in [*anchor, *mid, *low_opposite]]
+    states, _ = build_market_states(raw)
+    entries, _ = threshold_lock_entries(states, [], thresholds=(5,))
+    assert entries[0]["later_threshold_reversal"] is False
+
+
+def test_threshold_audit_is_policy_specific_and_unsettled_lock_is_not_settled():
+    start = "2026-01-02T20:00:00Z"
+    anchor = paired_state(observed="2026-01-01T20:00:00Z", gap=2)
+    entry = paired_state(observed="2026-01-01T20:30:00Z", gap=6)
+    raw = [dict(row, event_start_utc=start) for row in [*anchor, *entry]]
+    states, _ = build_market_states(raw)
+    entries, audit = threshold_lock_entries(states, [], thresholds=(5, 10))
+    assert audit.keys() == {"5", "10"} and audit["5"]["locked_entries"] == 1 and audit["10"]["locked_entries"] == 0
+    summary = readonly._threshold_economic_summary(entries)
+    assert summary["locked_entries_total"] == 1 and summary["settled_entries"] == 0 and summary["unsettled_entries"] == 1 and summary["roi"] is None
 
 
 def test_one_baseline_decision_and_push_binary_exclusion():
@@ -165,6 +374,18 @@ def test_end_to_end_benchmark_is_oos_deterministic_and_movement_matched():
     assert {row["signal_key"] for row in first["predictions"]["Model 4"]} == {row["signal_key"] for row in first["predictions"]["Model 3 movement cohort"]}
     assert all(row["movement_60m"] is not None for row in first["predictions"]["Model 4"])
     assert first["edge_buckets"]["Model 1"]
+
+
+def test_movement_only_runner_does_not_refit_primary_models(monkeypatch):
+    fitted = []
+    original = signal_model_benchmark._fit_predict
+    def spy(train, test, model):
+        fitted.append(model)
+        return original(train, test, model)
+    monkeypatch.setattr(signal_model_benchmark, "_fit_predict", spy)
+    result = run_walk_forward_benchmark(synthetic_decisions(), folds=3, include_movement=True, include_primary=False)
+    assert set(result["metrics"]) == {"Model 3 movement cohort", "Model 4"}
+    assert fitted and set(fitted) <= {"Model 3", "Model 4"}
 
 
 def test_primary_models_use_one_matched_feature_complete_oos_population():

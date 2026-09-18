@@ -126,6 +126,54 @@ def test_underpowered_data_stops_fitting_and_preserves_one_sided_label():
     )
 
 
+def _benchmark_runner_result(names):
+    return {
+        "predictions": {name: [] for name in names},
+        "metrics": {name: {"rows": 0, "log_loss": None, "brier": None} for name in names},
+        "fold_metrics": [{"model": name, "fold": 0, "rows": 0, "log_loss": None, "brier": None} for name in names],
+        "calibration": {name: [{"bucket": "50–60%", "count": 0}] for name in names},
+        "edge_buckets": {name: [{"bucket": "<=0%", "bets": 0}] for name in names},
+    }
+
+
+@pytest.mark.parametrize(
+    ("main_passed", "movement_passed", "expected_calls", "expected_models"),
+    (
+        (False, False, [], set()),
+        (True, False, [(False, True)], {"Model 0A", "Model 0B", "Model 1", "Model 2", "Model 3"}),
+        (False, True, [(True, False)], {"Model 3 movement cohort", "Model 4"}),
+        (True, True, [(False, True), (True, False)], {"Model 0A", "Model 0B", "Model 1", "Model 2", "Model 3", "Model 3 movement cohort", "Model 4"}),
+    ),
+)
+def test_main_and_movement_gates_execute_independently(monkeypatch, main_passed, movement_passed, expected_calls, expected_models):
+    """Movement fitting is independently gated and never refits primary models."""
+    calls = []
+    def fake_gate(_entries, movement=False):
+        return {"passed": movement_passed if movement else main_passed, "failures": [], "folds": [], "cohort": [{"movement_60m": 1.0}]}
+    def fake_runner(_rows, *, folds, include_movement, include_primary=True):
+        calls.append((include_movement, include_primary))
+        names = ("Model 3 movement cohort", "Model 4") if not include_primary else ("Model 0A", "Model 0B", "Model 1", "Model 2", "Model 3")
+        return _benchmark_runner_result(names)
+    monkeypatch.setattr(benchmark, "sufficiency_gate", fake_gate)
+    monkeypatch.setattr(benchmark, "run_walk_forward_benchmark", fake_runner)
+    result = benchmark.benchmark_if_sufficient([{}])
+    assert calls == expected_calls
+    assert set(result["models"]) == expected_models
+    if movement_passed:
+        assert result["calibration"]["Model 3 movement cohort"]
+        assert result["calibration"]["Model 4"]
+        assert result["edge_buckets"]["Model 3 movement cohort"]
+        assert result["edge_buckets"]["Model 4"]
+        assert "Model 4 vs Model 3 movement cohort" in result["comparisons"]
+        assert "Model 4 vs Model 3 movement cohort" in result["uncertainty"]
+        assert "Model 4" in result["roi_uncertainty"]
+    else:
+        assert "Model 4" not in result["models"]
+    if not main_passed:
+        assert result["comparisons"] == ({"Model 4 vs Model 3 movement cohort": result["comparisons"]["Model 4 vs Model 3 movement cohort"]} if movement_passed else {})
+        assert result["diagnostics"] == {}
+
+
 def test_workflow_is_manual_and_only_uses_readonly_secret():
     workflow = Path(".github/workflows/run-readonly-history-benchmark.yml").read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
@@ -156,11 +204,29 @@ def test_report_renders_complete_aggregate_sections_and_provenance_wording():
         "diagnostics": {"sport": {"minimum_rows": 20, "buckets": {"NFL": {"bets": 20}}, "suppressed_bucket_rows": {}}},
     }
     report = benchmark.render_report({"total_snapshots": 100, "result_coverage_by_sport": {"NFL": {"settled_games": 20}}}, benchmark_data)
-    for heading in ("Fold-by-fold OOS metrics", "Calibration buckets", "Fixed predicted-edge bucket economics", "Game-clustered ROI uncertainty", "Diagnostic breakdowns"):
+    for heading in ("Market-state pair audit", "Legacy per-selection baseline audit", "Direction-flip / material-reversal audit", "Landmark coverage", "Threshold-strategy observation coverage", "Threshold lock-policy economics", "Fold-by-fold OOS metrics", "Calibration buckets", "Fixed predicted-edge bucket economics", "Game-clustered ROI uncertainty", "Diagnostic breakdowns"):
         assert heading in report
     assert "one-sided implied market probability" in report
     assert "same-book paired-price provenance: **unavailable**" in report
     assert "official sportsbook closing line" in report
+
+
+def test_horizon_keyed_report_has_no_pooled_benchmark_sections():
+    gates = {"passed": False, "failures": ["binary W/L rows"]}
+    benchmark_data = {"by_landmark": {"T-360m": {"main_gate": gates, "movement_gate": gates, "models": {}, "comparisons": {}, "fold_metrics": [], "calibration": {}, "edge_buckets": {}, "roi_uncertainty": {}, "uncertainty": {}, "diagnostics": {}}, "T-180m": {"main_gate": gates, "movement_gate": gates, "models": {}, "comparisons": {}, "fold_metrics": [], "calibration": {}, "edge_buckets": {}, "roi_uncertainty": {}, "uncertainty": {}, "diagnostics": {}}}}
+    report = benchmark.render_report({}, benchmark_data)
+    assert "## Sufficiency by landmark" in report and "T-360m" in report and "T-180m" in report
+    assert "## Sufficiency\n" not in report
+
+
+def test_market_state_report_sections_remain_aggregate_only():
+    gates = {"passed": False, "failures": ["binary W/L rows"]}
+    report = benchmark.render_report(
+        {"market_state_pair_audit": {"valid_split_states": 2}, "landmark_coverage": {"T-60m": {"usable_landmark_rows": 1}}},
+        {"main_gate": gates, "movement_gate": gates, "models": {}, "uncertainty": {}},
+    )
+    assert "valid_split_states" in report
+    assert "matchup" not in report.casefold() and "signal_key" not in report
 
 
 def test_diagnostics_suppress_small_buckets_and_result_coverage_is_aggregate():
@@ -179,3 +245,10 @@ def test_roi_uncertainty_clusters_by_game_and_marks_small_samples_unavailable():
     bucket = bootstrap[">2% to 5%"]
     assert bucket["available"] is True and bucket["distinct_games"] == 20 and len(bucket["roi_ci_95"]) == 2
     assert benchmark.roi_bootstrap_by_bucket(rows[:19])[">2% to 5%"]["available"] is False
+
+
+def test_economic_summary_does_not_invent_zero_predicted_edge():
+    rows = [{"outcome": "win", "best_price": -110}, {"outcome": "loss", "best_price": -110, "predicted_edge": .04}]
+    summary = benchmark._economic_summary(rows)
+    assert summary["average_predicted_edge"] == .04
+    assert benchmark._economic_summary(rows[:1])["average_predicted_edge"] is None

@@ -9,6 +9,66 @@ fixture suite exercises Models 0B–4, strict same-kickoff walk-forward folds,
 calibration buckets, fixed edge buckets, expected value, and provenance guards
 for a later read-only run.
 
+## Market-state methodology
+
+Raw history remains unchanged. Research now treats complementary provider-card
+sides at one `(game_key, market, observed_at_utc)` as a single market state,
+not independent selection baselines. Moneyline and Spread use away/home
+orientation; Total uses over/under. The canonical away/over gap is the signed
+gap. A valid split state requires a complete zero-sum pair but does not require
+a sportsbook quote; quote executability is checked only for modeling or entry.
+Paired Bets% and Money% each must sum to approximately 100, with a one
+percentage-point rounding tolerance; malformed share pairs are audited rather
+than normalized.
+
+Global `data_quality` combines structural split and quote-related parser flags.
+It is therefore audited, not used as a blanket split-state veto: explicit paired
+share, gap, side, and identity checks determine structural validity. A
+structurally valid state without an executable quote remains available for split
+coverage, movement, and reversal history, while model and entry selection still
+require a usable quote.
+
+Primary cohorts are fixed T-6h, T-3h, and T-1h landmarks. Each uses only the
+latest usable canonical quote at or before the target and within 45 minutes
+before it; post-target observations are never used. The canonical away/over
+side is always the prediction target. Market-level 60-minute movement uses an
+earlier paired state, not selection identity.
+
+Direction flips compare non-zero signed directions. Material reversals use
+independent 5/10/15/20pp threshold regimes: zero and sub-threshold observations
+do not reset an established regime. The former per-selection baseline remains
+an aggregate audit only and is excluded from primary fitting.
+
+The secondary 24-hour threshold-entry study uses the first *observed*
+qualifying executable favored-side state under a lock policy. It distinguishes
+30-minute start/end coverage grace, 45-minute internal gaps, and left/gap/right
+censoring. Censored history cannot support a full first-entry or no-entry
+claim; right censoring after a locked entry does not erase that entry. Later
+reversals are descriptive only—no cash-out, hedge, or flip economics are
+invented.
+
+Threshold coverage and reversal follow-up are reported independently for each
+5/10/15/20pp policy. Locked-but-unsettled entries remain coverage evidence but
+are excluded from settled ROI; each policy's ROI denominator is settled entries
+only. Raw flip event count is distinct from the proportion of series with a
+flip. Missing model edge is N/A, never an invented zero-percent edge.
+
+All landmark cohorts remain separate under strict chronological game-grouped
+validation. The price baseline remains one-sided implied probability: current
+storage lacks defensible same-book paired-price provenance for no-vig pricing.
+These rules establish research readiness only; they make no profitability,
+predictive-value, or production-readiness claim.
+
+Landmark coverage starts from all raw supported game-market observations; valid
+paired-state coverage and canonical quote eligibility are separate later
+stages. Main and movement sufficiency gates are independent: Model 4 and its
+matched Model-3 movement cohort may run when the movement gate passes even if
+the main benchmark is insufficient, and Model 4 is never fitted when that
+movement gate fails.
+Threshold entries explicitly distinguish settled, unsettled, and invalid
+settlement status; only settled entries enter threshold ROI. Pair-audit checks
+run in prerequisite order so malformed gaps are not mislabeled as share errors.
+
 ## Data lineage and population
 
 Source-code inspection shows that `ScoresAndOdds consensus-picks HTML` is parsed
@@ -26,10 +86,11 @@ provenance.
 Code-path classification: **full parsed-provider-card population**, subject to
 whatever markets/cards the upstream consensus page exposes. It is not a complete
 all-sportsbook board. Actual production-history completeness was not verified
-because read-only production database access was unavailable. A benchmark on
-baseline decisions is conditional on the current positive-gap/executable
-selection universe and cannot establish effects for filtered-out sides,
-zero/negative gaps, or the complete market.
+because read-only production database access was unavailable. The market-state
+benchmark uses paired provider-card observations, a fixed canonical target, and
+fixed backward-only landmarks with canonical-quote eligibility. The legacy
+positive-selection baseline is retained only as an audit; neither design can
+establish effects for the complete sportsbook market.
 
 ## Stored fields and provenance
 
