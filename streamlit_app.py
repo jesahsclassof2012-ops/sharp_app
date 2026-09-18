@@ -35,6 +35,7 @@ from sharp_core import (
     validate_percentages,
 )
 from history_store import HistoryStore, bucket_performance, game_key, performance, signal_key
+from market_state_history import read_research_history, summarize_market_state_history
 
 
 logger = logging.getLogger(__name__)
@@ -273,7 +274,7 @@ def history_metric_items(stored_observations: int, metrics: dict[str, Any]) -> t
     clv_market = metrics.get("clv_market")
     return (
         ("Stored observations", stored_observations),
-        ("Unique settled baseline signals", metrics["settled"]), ("Wins", metrics["wins"]),
+        ("Legacy settled selections", metrics["settled"]), ("Wins", metrics["wins"]),
         ("Losses", metrics["losses"]), ("Pushes", metrics["pushes"]),
         ("Win rate", metrics["win_rate"]), ("Units", metrics["units"]), ("ROI", metrics["roi"]),
         ("Average CLV", format_clv(average_clv, clv_market)),
@@ -638,6 +639,62 @@ def results_table_for_display(data: pd.DataFrame):
     return table.style.format({"Gap Δ 60m": format_movement_gap}, na_rep="N/A")
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_market_state_history(sport: str) -> dict[str, Any]:
+    """Five-minute, sport-scoped cache for the read-only research path."""
+    snapshots, results = read_research_history(sport)
+    return summarize_market_state_history(snapshots, results)
+
+
+def readiness_label(gate: dict[str, Any]) -> str:
+    return "Ready for manual benchmark" if gate["passed"] else "Not enough history"
+
+
+def readable_failures(failures: list[str]) -> str:
+    labels = {"unique settled games": "Not enough settled games", "binary W/L rows": "Not enough win/loss rows", "distinct event dates": "Not enough event dates", "valid chronological folds": "Not enough chronological test periods", "test games per fold": "Not enough test games per period", "both training outcome classes": "Training history does not yet contain both result classes"}
+    return "; ".join(labels.get(item, item) for item in failures)
+
+
+def market_state_recent_rows(rows: list[dict[str, Any]], limit: int = 20) -> pd.DataFrame:
+    return pd.DataFrame([{"Event start": row.get("event_start_utc"), "Sport": row.get("sport"), "Matchup": row.get("matchup"), "Market": row.get("market"), "Reference selection": row.get("selection"), "Captured line": row.get("best_line"), "Captured price": format_price(row.get("best_price")), "Bets %": format_percent(row.get("bets_pct")), "Money %": format_percent(row.get("money_pct")), "Signed gap": format_gap(row.get("signed_gap")), "Gap Δ 60m": format_gap(row.get("movement_60m")), "Reference outcome": row.get("outcome")} for row in sorted(rows, key=lambda item: str(item.get("event_start_utc") or ""), reverse=True)[:limit]])
+
+
+def render_market_state_research() -> None:
+    """Coverage/readiness only: never fits a model or calls legacy analytics."""
+    all_data = cached_market_state_history("All sports")
+    sports = sorted({str(row.get("sport")) for row in all_data["snapshots"] if row.get("sport")})
+    scope = st.selectbox("History sport", ["All sports", *sports], key="history_research_sport")
+    data = all_data if scope == "All sports" else cached_market_state_history(scope)
+    if st.button("Refresh history", key="refresh_research_history"):
+        cached_market_state_history.clear(); st.rerun()
+    st.caption("Stored observations are repeated snapshots collected through time. Opposite sides from the same game market and observation time are combined into one market state.")
+    with st.container(horizontal=True, wrap=True, gap="small"):
+        for label, value in (("Stored observations", data["summary"]["stored_observations"]), ("Unique games observed", data["summary"]["unique_games"]), ("Valid paired market states", data["summary"]["valid_states"]), ("Recorded game results", data["summary"]["recorded_results"]), ("Non-OK paired states retained", data["summary"]["non_ok_retained"])):
+            st.metric(label, value, width="content")
+    st.subheader("Landmark coverage")
+    mapping = {"raw_game_markets_considered": "Raw game-markets", "no_valid_paired_state": "No valid pair", "valid_paired_state_only_after_target": "Only after decision time", "valid_paired_state_before_target_but_stale": "Too stale", "valid_paired_state_in_45m_window": "Valid in window", "paired_state_in_window_but_no_usable_canonical_quote": "No usable quote", "usable_landmark_row": "Usable landmark"}
+    coverage = []
+    for label, source in (("T-6h", "T-360m"), ("T-3h", "T-180m"), ("T-1h", "T-60m")):
+        coverage.append({"Decision time": label, **{display: data["coverage"].get(source, {}).get(key, 0) for key, display in mapping.items()}})
+    st.dataframe(pd.DataFrame(coverage), use_container_width=True, hide_index=True)
+    st.caption("A usable landmark means a valid paired market state with an executable reference-side quote was captured during the 45 minutes before that decision time.")
+    counts = [(name, len(data["by_horizon"][name])) for name in ("T-6h", "T-3h", "T-1h")]
+    st.caption(" · ".join(f"{name} settled observations: {count}" for name, count in counts) + ". A game-market can contribute at more than one decision time; do not add these as independent bets.")
+    st.subheader("Model readiness")
+    for name in ("T-6h", "T-3h", "T-1h"):
+        state = data["readiness"][name]
+        st.markdown(f"**{name}** — MAIN: {readiness_label(state['main'])}; MOVEMENT: {readiness_label(state['movement'])}")
+        failures = [*state["main"]["failures"], *state["movement"]["failures"]]
+        if failures: st.caption(readable_failures(list(dict.fromkeys(failures))))
+    horizon = st.selectbox("Recent landmark horizon", ["T-6h", "T-3h", "T-1h"], key="recent_landmark_horizon")
+    st.subheader("Recent settled landmark observations")
+    recent = market_state_recent_rows(data["by_horizon"][horizon])
+    if recent.empty: st.info("No settled landmark observations are available for this history scope.")
+    else: st.dataframe(recent, use_container_width=True, hide_index=True)
+    with st.expander("Methodology", expanded=False):
+        st.markdown("""Repeated snapshots are paired into market states. Away is the fixed reference for Moneyline and Spread; Over is the fixed reference for Totals. T-6h, T-3h, and T-1h are separate, backward-looking decision times. Quote availability is separate from split-state validity, and 60-minute movement uses earlier paired history. These reference observations are not betting recommendations. Models run only through the manual benchmark after readiness requirements are met. Market probabilities are one-sided implied probabilities, not no-vig; captured pregame close is not an official sportsbook close.""")
+
+
 def render_history() -> None:
     """Render persistent history only after the user explicitly requests it."""
     st.divider()
@@ -651,6 +708,14 @@ def render_history() -> None:
     with st.expander("History / Performance", expanded=history_loaded):
         if not os.getenv("DATABASE_URL"):
             st.warning("History unavailable: configure DATABASE_URL.")
+            return
+        view = st.selectbox("History view", ["Market-state research", "Legacy baseline"], key="history_view")
+        if view == "Market-state research":
+            try:
+                render_market_state_research()
+            except Exception:
+                logger.exception("Market-state history failed to load")
+                st.warning("History is temporarily unavailable.")
             return
         try:
             store = HistoryStore(production=True)
@@ -671,7 +736,7 @@ def render_history() -> None:
             logger.exception("History failed to load")
             st.warning("History is temporarily unavailable.")
             return
-        st.caption("Persistent database history. Small samples are not evidence of a profitable strategy.")
+        st.caption("Legacy baseline for comparison only. Small samples are not evidence of a profitable strategy.")
         with st.expander("Methodology", expanded=False):
             st.markdown("""**Baseline entry:** earliest snapshot for a signal with a valid pregame timestamp, `Data quality = OK`, an executable best price, a valid Spread/Total line where required, and `Money % − Bets % > 0`.
 
@@ -700,10 +765,11 @@ def render_history() -> None:
         summary = bucket_performance(filtered_rows, breakdowns[selected])
         if summary:
             st.dataframe(history_breakdown_frame(summary), use_container_width=True)
-        st.subheader("Recent settled signals")
+        st.info("Legacy baseline is kept for comparison only. It treats each selection separately and can count opposite selections from the same game-market if they qualified at different times.")
+        st.subheader("Recent legacy settled selections")
         audit = history_audit_rows(filtered_rows)
         if audit.empty:
-            st.info("No settled signals are available for this history scope.")
+            st.info("No legacy settled selections are available for this history scope.")
         else:
             st.dataframe(audit, use_container_width=True, hide_index=True, column_config={
                 "Event start": st.column_config.DatetimeColumn(format="MMM D, h:mm a"),
