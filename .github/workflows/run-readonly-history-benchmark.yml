@@ -22,7 +22,7 @@ jobs:
       - name: Run aggregate read-only benchmark
         env:
           READONLY_DATABASE_URL: ${{ secrets.READONLY_DATABASE_URL }}
-        run: python analysis/readonly_history_benchmark.py
+        run: python -m analysis.readonly_history_benchmark
       - name: Upload aggregate research report
         uses: actions/upload-artifact@v4
         with:

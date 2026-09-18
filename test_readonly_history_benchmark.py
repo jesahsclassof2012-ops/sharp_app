@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import subprocess
 import sys
 import types
 
@@ -43,6 +45,25 @@ def test_missing_readonly_database_url_fails_closed(monkeypatch):
     monkeypatch.delenv("READONLY_DATABASE_URL", raising=False)
     with pytest.raises(benchmark.BenchmarkSafetyError, match="READONLY_DATABASE_URL is required"):
         benchmark.connect_readonly()
+
+
+def test_module_entrypoint_imports_then_fails_closed_without_readonly_url():
+    """The workflow entrypoint must preserve package imports without a DB connection."""
+    environment = os.environ.copy()
+    environment.pop("READONLY_DATABASE_URL", None)
+    completed = subprocess.run(
+        [sys.executable, "-m", "analysis.readonly_history_benchmark"],
+        cwd=Path(__file__).parent,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = completed.stdout + completed.stderr
+    assert completed.returncode != 0
+    assert "READONLY_DATABASE_URL is required" in output
+    assert "ModuleNotFoundError" not in output
+    assert "Unable to connect to the configured read-only database" not in output
 
 
 def test_readonly_connection_requires_ssl_without_exposing_connection_string(monkeypatch, capsys):
@@ -113,6 +134,8 @@ def test_workflow_is_manual_and_only_uses_readonly_secret():
     assert "secrets.READONLY_DATABASE_URL" in workflow
     assert "secrets.DATABASE_URL" not in workflow
     assert "set -x" not in workflow
+    assert "run: python -m analysis.readonly_history_benchmark" in workflow
+    assert "run: python analysis/readonly_history_benchmark.py" not in workflow
 
 
 def oos_row(game, signal, *, sport="NFL", market="Moneyline", outcome="win", edge=.03, clv=.02, bets=40, start="2026-01-02T20:00:00Z"):
