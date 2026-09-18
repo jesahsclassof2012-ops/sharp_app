@@ -16,10 +16,14 @@ from typing import Any, Iterable
 
 from analysis.signal_model_benchmark import (
     binary_metrics,
+    build_market_states,
     chronological_game_folds,
     decision_rows,
+    direction_reversal_audit,
+    landmark_decision_rows,
     primary_model_eligible,
     run_walk_forward_benchmark,
+    threshold_lock_entries,
 )
 from history_store import american_profit, calculate_clv, executable_pregame, line_value
 
@@ -458,6 +462,10 @@ def render_report(audit: dict[str, Any], benchmark: dict[str, Any]) -> str:
         "- Captured-close CLV, where available, is not an official sportsbook closing line.",
         "", "## Population limitation", "The stored population is the application's provider-card collection path. Baseline decisions are selection-conditioned on executable positive-gap entries and do not represent a complete sportsbook board.",
         "", "## Audit", "```json", json.dumps(safe_audit, indent=2, sort_keys=True), "```",
+        "", "## Market-state pair audit", "```json", json.dumps(_redact_sensitive(audit.get("market_state_pair_audit", {})), indent=2, sort_keys=True), "```",
+        "", "## Legacy per-selection baseline audit", "Legacy rows are audit-only and are excluded from primary market-state fitting.", "```json", json.dumps(_redact_sensitive(audit.get("legacy_per_selection_baseline_audit", {})), indent=2, sort_keys=True), "```",
+        "", "## Direction-flip / material-reversal audit", "Direction flips use the prior non-zero sign. Material reversals require the opposite 5/10/15/20pp threshold regime.", "```json", json.dumps(_redact_sensitive(audit.get("reversal_audit", {})), indent=2, sort_keys=True), "```",
+        "", "## Landmark coverage", "T-6h, T-3h, and T-1h are separate backward-only cohorts; no post-target state is used.", "```json", json.dumps(_redact_sensitive(audit.get("landmark_coverage", {})), indent=2, sort_keys=True), "```",
         "", "## Sufficiency", "```json", json.dumps({key: {"passed": value["passed"], "failures": value["failures"]} for key, value in (("main", benchmark["main_gate"]), ("movement", benchmark["movement_gate"]))}, indent=2), "```",
         "", "## Out-of-sample benchmark", "```json", json.dumps(benchmark.get("models", {}), indent=2, sort_keys=True), "```",
         "", "## Matched model comparisons", "```json", json.dumps(benchmark.get("comparisons", {}), indent=2, sort_keys=True), "```",
@@ -467,6 +475,10 @@ def render_report(audit: dict[str, Any], benchmark: dict[str, Any]) -> str:
         "", "## Game-clustered ROI uncertainty", "```json", json.dumps(benchmark.get("roi_uncertainty", {}), indent=2, sort_keys=True), "```",
         "", "## Uncertainty", "```json", json.dumps(benchmark.get("uncertainty", {}), indent=2, sort_keys=True), "```",
         "", "## Diagnostic breakdowns", f"Only buckets with at least {MIN_DIAGNOSTIC_ROWS} OOS rows are displayed; smaller buckets are suppressed.", "```json", json.dumps(benchmark.get("diagnostics", {}), indent=2, sort_keys=True), "```",
+        "", "## OOS models by landmark", "Landmarks are reported separately and never pooled.", "```json", json.dumps(_redact_sensitive(benchmark.get("by_landmark", {})), indent=2, sort_keys=True), "```",
+        "", "## Threshold-strategy observation coverage", "First observed qualifying state is not a claim about an unobserved first crossing.", "```json", json.dumps(_redact_sensitive(audit.get("threshold_coverage", {})), indent=2, sort_keys=True), "```",
+        "", "## Threshold lock-policy economics", "Only the first qualifying executable favored-side entry is locked; later reversals do not erase or replace it.", "```json", json.dumps(_redact_sensitive(audit.get("threshold_lock_economics", {})), indent=2, sort_keys=True), "```",
+        "", "## Threshold reversal diagnostics", "```json", json.dumps(_redact_sensitive(audit.get("threshold_reversal_diagnostics", {})), indent=2, sort_keys=True), "```",
         "", "No production ranking change is proposed by this research report.", "",
     ))
 
@@ -490,9 +502,36 @@ def run() -> dict[str, Any]:
         snapshots, results = fetch_production_rows(connection)
     finally:
         connection.close()
-    entries = attach_captured_clv(decision_rows(snapshots, results), snapshots)
+    states, pair_audit = build_market_states(snapshots)
+    entries, landmark_coverage = landmark_decision_rows(states, results)
+    entries = attach_captured_clv(entries, snapshots)
     audit = audit_statistics(snapshots, results, entries)
+    legacy = decision_rows(snapshots, results)
+    legacy_groups = _groups(legacy, lambda row: (row.get("game_key"), row.get("market")))
+    audit["market_state_pair_audit"] = pair_audit
+    audit["landmark_coverage"] = landmark_coverage
+    audit["legacy_per_selection_baseline_audit"] = {
+        "settled_game_markets": len(legacy_groups),
+        "one_legacy_positive_selection": sum(len(rows) == 1 for rows in legacy_groups.values()),
+        "two_opposite_legacy_positive_selections": sum(len(rows) >= 2 for rows in legacy_groups.values()),
+    }
+    reversal = direction_reversal_audit(states)
+    audit["reversal_audit"] = {
+        "series": len(reversal), "raw_flips": sum(value["raw_flip_count"] for value in reversal.values()),
+        "material_reversals": {str(threshold): sum(value["material"][threshold]["count"] for value in reversal.values()) for threshold in (5, 10, 15, 20)},
+    }
+    locked, threshold_audit = threshold_lock_entries(states, results)
+    audit["threshold_coverage"] = threshold_audit
+    audit["threshold_lock_economics"] = _economic_summary(locked)
+    audit["threshold_reversal_diagnostics"] = {"locked_entries_with_later_threshold_reversal": sum(bool(row.get("later_threshold_reversal")) for row in locked)}
+    per_landmark = {}
+    for horizon in (360, 180, 60):
+        result = benchmark_if_sufficient([row for row in entries if row.get("landmark_horizon_minutes") == horizon])
+        per_landmark[f"T-{horizon}m"] = {key: value for key, value in result.items() if key not in {"main_gate", "movement_gate"}}
+        per_landmark[f"T-{horizon}m"]["main_gate"] = {key: result["main_gate"][key] for key in ("passed", "failures")}
+        per_landmark[f"T-{horizon}m"]["movement_gate"] = {key: result["movement_gate"][key] for key in ("passed", "failures")}
     benchmark = benchmark_if_sufficient(entries)
+    benchmark["by_landmark"] = per_landmark
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(render_report(audit, benchmark), encoding="utf-8")
     return {"audit": audit, "benchmark": benchmark}

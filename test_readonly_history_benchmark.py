@@ -156,11 +156,21 @@ def test_report_renders_complete_aggregate_sections_and_provenance_wording():
         "diagnostics": {"sport": {"minimum_rows": 20, "buckets": {"NFL": {"bets": 20}}, "suppressed_bucket_rows": {}}},
     }
     report = benchmark.render_report({"total_snapshots": 100, "result_coverage_by_sport": {"NFL": {"settled_games": 20}}}, benchmark_data)
-    for heading in ("Fold-by-fold OOS metrics", "Calibration buckets", "Fixed predicted-edge bucket economics", "Game-clustered ROI uncertainty", "Diagnostic breakdowns"):
+    for heading in ("Market-state pair audit", "Legacy per-selection baseline audit", "Direction-flip / material-reversal audit", "Landmark coverage", "OOS models by landmark", "Threshold-strategy observation coverage", "Threshold lock-policy economics", "Fold-by-fold OOS metrics", "Calibration buckets", "Fixed predicted-edge bucket economics", "Game-clustered ROI uncertainty", "Diagnostic breakdowns"):
         assert heading in report
     assert "one-sided implied market probability" in report
     assert "same-book paired-price provenance: **unavailable**" in report
     assert "official sportsbook closing line" in report
+
+
+def test_market_state_report_sections_remain_aggregate_only():
+    gates = {"passed": False, "failures": ["binary W/L rows"]}
+    report = benchmark.render_report(
+        {"market_state_pair_audit": {"valid_split_states": 2}, "landmark_coverage": {"T-60m": {"usable_landmark_rows": 1}}},
+        {"main_gate": gates, "movement_gate": gates, "models": {}, "uncertainty": {}},
+    )
+    assert "valid_split_states" in report
+    assert "matchup" not in report.casefold() and "signal_key" not in report
 
 
 def test_diagnostics_suppress_small_buckets_and_result_coverage_is_aggregate():

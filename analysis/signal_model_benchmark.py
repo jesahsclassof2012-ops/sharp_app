@@ -23,10 +23,36 @@ from history_store import (
 MOVEMENT_MINUTES = 60
 MOVEMENT_TOLERANCE_MINUTES = 20
 
+# Market-state research is deliberately separate from the application's
+# per-selection history semantics.  These are predeclared observation rules,
+# not live scanner thresholds.
+MARKET_GAP_SUM_TOLERANCE = 1e-9
+LANDMARK_HORIZONS_MINUTES = (360, 180, 60)
+LANDMARK_MAX_STALENESS_MINUTES = 45
+MATERIAL_REVERSAL_THRESHOLDS = (5, 10, 15, 20)
+THRESHOLD_GAPS = (5, 10, 15, 20)
+ENTRY_WINDOW_MINUTES = 24 * 60
+ENTRY_COVERAGE_START_GRACE_MINUTES = 30
+ENTRY_COVERAGE_END_GRACE_MINUTES = 30
+ENTRY_COVERAGE_MAX_GAP_MINUTES = 45
+
+CANONICAL_SIDES = {
+    "Moneyline": ("away", "home"),
+    "Spread": ("away", "home"),
+    "Total": ("over", "under"),
+}
+
 
 def _time(value: Any) -> datetime:
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def _grouped(rows: Iterable[dict[str, Any]], key) -> dict[Any, list[dict[str, Any]]]:
+    grouped: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[key(row)].append(row)
+    return grouped
 
 
 def no_vig_probability(
@@ -403,3 +429,209 @@ def run_walk_forward_benchmark(rows: Iterable[dict[str, Any]], folds: int = 3) -
         values["delta_log_loss_vs_model_0b"] = None if values["log_loss"] is None or baseline.get("log_loss") is None else values["log_loss"] - baseline["log_loss"]
         values["delta_brier_vs_model_0b"] = None if values["brier"] is None or baseline.get("brier") is None else values["brier"] - baseline["brier"]
     return {"folds": fold_pairs, "predictions": dict(predictions), "fold_metrics": fold_metrics, "metrics": metrics, "calibration": {model: calibration_buckets(values) for model, values in predictions.items()}, "edge_buckets": {model: edge_bucket_performance(values) for model, values in predictions.items()}}
+
+
+def _gap(row: dict[str, Any]) -> float | None:
+    """Use the stored gap where present; otherwise verify it from split shares."""
+    try:
+        value = row.get("money_minus_bets_gap")
+        return float(value) if value is not None else float(row["money_pct"]) - float(row["bets_pct"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def build_market_states(snapshots: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Pair complementary raw sides into valid (game, market, timestamp) states.
+
+    Quote availability is intentionally not a pair-validity requirement.  This
+    keeps split coverage distinct from whether a wager could be executed.
+    """
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in snapshots:
+        if row.get("game_key") and row.get("market") in CANONICAL_SIDES and row.get("observed_at_utc"):
+            grouped[(str(row["game_key"]), str(row["market"]), str(row["observed_at_utc"]))].append(row)
+    states: list[dict[str, Any]] = []
+    audit = {"complete_pairs": 0, "incomplete_pairs": 0, "duplicate_sides": 0, "malformed_pairs": 0, "zero_sum_failures": 0, "valid_split_states": 0}
+    for (game, market, observed), rows in grouped.items():
+        canonical_side, opposite_side = CANONICAL_SIDES[market]
+        sides: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            sides[str(row.get("selection_side") or "").casefold()].append(row)
+        if set(sides) != {canonical_side, opposite_side}:
+            audit["incomplete_pairs"] += 1
+            continue
+        if len(sides[canonical_side]) != 1 or len(sides[opposite_side]) != 1:
+            audit["duplicate_sides"] += 1
+            continue
+        canonical, opposite = sides[canonical_side][0], sides[opposite_side][0]
+        canonical_gap, opposite_gap = _gap(canonical), _gap(opposite)
+        try:
+            _time(canonical["event_start_utc"])
+            valid_shares = all(value is not None for value in (canonical.get("bets_pct"), canonical.get("money_pct"), opposite.get("bets_pct"), opposite.get("money_pct")))
+        except (KeyError, TypeError, ValueError):
+            valid_shares = False
+        if canonical_gap is None or opposite_gap is None or not valid_shares:
+            audit["malformed_pairs"] += 1
+            continue
+        if abs(canonical_gap + opposite_gap) > MARKET_GAP_SUM_TOLERANCE:
+            audit["zero_sum_failures"] += 1
+            continue
+        signed = canonical_gap
+        favored = "canonical" if signed > 0 else "opposite" if signed < 0 else "none"
+        states.append({
+            "game_key": game, "sport": canonical.get("sport"), "matchup": canonical.get("matchup"),
+            "event_start_utc": canonical.get("event_start_utc"), "market": market, "observed_at_utc": observed,
+            "canonical_selection": canonical.get("selection"), "canonical_selection_side": canonical_side,
+            "opposite_selection": opposite.get("selection"), "opposite_selection_side": opposite_side,
+            "canonical_bets_pct": canonical.get("bets_pct"), "canonical_money_pct": canonical.get("money_pct"), "canonical_gap": canonical_gap,
+            "opposite_bets_pct": opposite.get("bets_pct"), "opposite_money_pct": opposite.get("money_pct"), "opposite_gap": opposite_gap,
+            "signed_gap": signed, "gap_magnitude": abs(signed), "favored_side": favored,
+            "favored_selection": canonical.get("selection") if favored == "canonical" else opposite.get("selection") if favored == "opposite" else None,
+            "canonical_best_line": canonical.get("best_line"), "canonical_best_price": canonical.get("best_price"),
+            "opposite_best_line": opposite.get("best_line"), "opposite_best_price": opposite.get("best_price"),
+            "canonical_row": canonical, "opposite_row": opposite,
+        })
+        audit["complete_pairs"] += 1; audit["valid_split_states"] += 1
+    return sorted(states, key=lambda row: (str(row["event_start_utc"]), str(row["game_key"]), row["market"], str(row["observed_at_utc"]))), audit
+
+
+def _quote_usable(state: dict[str, Any], side: str = "canonical") -> bool:
+    """Execution validation applies after split pairing, never during it."""
+    prefix = "canonical" if side == "canonical" else "opposite"
+    row = state.get(f"{prefix}_row") or {}
+    if row.get("best_price") in (None, 0):
+        return False
+    try:
+        pregame = _time(state["observed_at_utc"]) < _time(state["event_start_utc"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return pregame and (state["market"] == "Moneyline" or line_value(row.get("best_line")) is not None)
+
+
+def select_landmark_states(states: Iterable[dict[str, Any]], horizons: Iterable[int] = LANDMARK_HORIZONS_MINUTES) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]]]:
+    """Select the latest usable state at or before each fixed landmark only."""
+    grouped = _grouped(states, lambda row: (row["game_key"], row["market"]))
+    selected: list[dict[str, Any]] = []
+    audit: dict[str, dict[str, int]] = {}
+    for horizon in horizons:
+        counts = {"no_paired_state": 0, "paired_no_usable_quote": 0, "stale": 0, "usable_landmark_rows": 0}
+        for values in grouped.values():
+            start = _time(values[0]["event_start_utc"]); target = start.timestamp() - horizon * 60
+            prior = [row for row in values if _time(row["observed_at_utc"]).timestamp() <= target]
+            window = [row for row in prior if _time(row["observed_at_utc"]).timestamp() >= target - LANDMARK_MAX_STALENESS_MINUTES * 60]
+            if not prior:
+                counts["no_paired_state"] += 1; continue
+            if not window:
+                counts["stale"] += 1; continue
+            usable = [row for row in window if _quote_usable(row, "canonical")]
+            if not usable:
+                counts["paired_no_usable_quote"] += 1; continue
+            row = dict(max(usable, key=lambda value: _time(value["observed_at_utc"])))
+            row["landmark_horizon_minutes"] = horizon
+            selected.append(row); counts["usable_landmark_rows"] += 1
+        audit[f"T-{horizon}m"] = counts
+    return selected, audit
+
+
+def market_state_movement(current: dict[str, Any], states: Iterable[dict[str, Any]]) -> float | None:
+    """Use prior paired market states, never signal-key history or future data."""
+    decision = _time(current["observed_at_utc"]); target = decision.timestamp() - MOVEMENT_MINUTES * 60
+    candidates = []
+    for state in states:
+        if state.get("game_key") != current.get("game_key") or state.get("market") != current.get("market"):
+            continue
+        observed = _time(state["observed_at_utc"])
+        if observed >= decision or observed >= _time(state["event_start_utc"]):
+            continue
+        distance = abs(observed.timestamp() - target)
+        if distance <= MOVEMENT_TOLERANCE_MINUTES * 60:
+            candidates.append((distance, observed, state))
+    if not candidates:
+        return None
+    prior = min(candidates, key=lambda item: (item[0], item[1]))[2]
+    return float(current["signed_gap"]) - float(prior["signed_gap"])
+
+
+def landmark_decision_rows(states: Iterable[dict[str, Any]], results: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]]]:
+    """Settle the canonical away/over target at each fixed landmark."""
+    state_list = list(states); selected, coverage = select_landmark_states(state_list)
+    scores = {row.get("game_key"): row for row in results}; output = []
+    for state in selected:
+        result = scores.get(state["game_key"])
+        if not result:
+            continue
+        row = state["canonical_row"]
+        try:
+            outcome = settle_selection(state["market"], state["canonical_selection_side"], line_value(row.get("best_line")), result["away_score"], result["home_score"])
+            minutes = (_time(state["event_start_utc"]) - _time(state["observed_at_utc"])).total_seconds() / 60
+        except (KeyError, TypeError, ValueError):
+            continue
+        item = dict(row)
+        item.update({
+            "decision_timestamp": state["observed_at_utc"], "landmark_horizon_minutes": state["landmark_horizon_minutes"],
+            "raw_gap": state["signed_gap"], "signed_gap": state["signed_gap"], "gap_magnitude": state["gap_magnitude"],
+            "bets_pct": state["canonical_bets_pct"], "money_pct": state["canonical_money_pct"], "minutes_to_start": minutes,
+            "outcome": outcome, "binary_target": 1 if outcome == "win" else 0 if outcome == "loss" else None,
+            "market_probability": implied_probability(row.get("best_price")), "market_probability_type": "one_sided_implied",
+            "movement_60m": market_state_movement(state, state_list),
+            "signal_key": f"{state['game_key']}|{state['market']}|T-{state['landmark_horizon_minutes']}",
+        })
+        output.append(item)
+    return output, coverage
+
+
+def direction_reversal_audit(states: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Audit raw flips and threshold regimes without treating them as wagers."""
+    output = {}
+    for key, values in _grouped(states, lambda row: (row["game_key"], row["market"])).items():
+        ordered = sorted(values, key=lambda row: _time(row["observed_at_utc"]))
+        last_nonzero = None; flips = []; regimes = {threshold: None for threshold in MATERIAL_REVERSAL_THRESHOLDS}; reversals = {threshold: [] for threshold in MATERIAL_REVERSAL_THRESHOLDS}
+        first_nonzero = None
+        for row in ordered:
+            gap = float(row["signed_gap"]); sign = 1 if gap > 0 else -1 if gap < 0 else 0
+            if sign:
+                if first_nonzero is None: first_nonzero = sign
+                if last_nonzero is not None and sign != last_nonzero: flips.append(row["observed_at_utc"])
+                last_nonzero = sign
+            for threshold in MATERIAL_REVERSAL_THRESHOLDS:
+                if abs(gap) < threshold or not sign: continue
+                if regimes[threshold] is not None and sign != regimes[threshold]: reversals[threshold].append(row["observed_at_utc"])
+                regimes[threshold] = sign
+        output[str(key)] = {"valid_states": len(ordered), "first_nonzero_direction": first_nonzero, "raw_flip_count": len(flips), "first_raw_flip": flips[0] if flips else None, "material": {threshold: {"count": len(values), "first": values[0] if values else None} for threshold, values in reversals.items()}}
+    return output
+
+
+def threshold_lock_entries(states: Iterable[dict[str, Any]], results: Iterable[dict[str, Any]], thresholds: Iterable[int] = THRESHOLD_GAPS) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """First observed executable threshold entry; later reversals remain descriptive."""
+    scores = {row.get("game_key"): row for row in results}; output = []
+    audit = {"left_censored": 0, "gap_censored": 0, "right_censored": 0, "non_executable_qualifying_states": 0, "locked_entries": 0, "no_entry_complete_coverage": 0}
+    for _, values in _grouped(states, lambda row: (row["game_key"], row["market"])).items():
+        ordered = sorted(values, key=lambda row: _time(row["observed_at_utc"])); start = _time(ordered[0]["event_start_utc"]); window_start = start.timestamp() - ENTRY_WINDOW_MINUTES * 60
+        anchors = [row for row in ordered if abs(_time(row["observed_at_utc"]).timestamp() - window_start) <= ENTRY_COVERAGE_START_GRACE_MINUTES * 60]
+        if not anchors:
+            audit["left_censored"] += len(tuple(thresholds)); continue
+        coverage_start = min(anchors, key=lambda row: (abs(_time(row["observed_at_utc"]).timestamp() - window_start), _time(row["observed_at_utc"])))
+        observed = [row for row in ordered if _time(row["observed_at_utc"]) >= _time(coverage_start["observed_at_utc"]) and _time(row["observed_at_utc"]) < start]
+        gaps = any((_time(after["observed_at_utc"]) - _time(before["observed_at_utc"])).total_seconds() > ENTRY_COVERAGE_MAX_GAP_MINUTES * 60 for before, after in zip(observed, observed[1:]))
+        end_covered = any(0 <= (start - _time(row["observed_at_utc"])).total_seconds() <= ENTRY_COVERAGE_END_GRACE_MINUTES * 60 for row in observed)
+        for threshold in thresholds:
+            locked = None
+            for state in observed:
+                if gaps and _time(state["observed_at_utc"]) > _time(coverage_start["observed_at_utc"]):
+                    audit["gap_censored"] += 1; break
+                if abs(float(state["signed_gap"])) < threshold: continue
+                side = "canonical" if state["signed_gap"] > 0 else "opposite"
+                if not _quote_usable(state, side): audit["non_executable_qualifying_states"] += 1; continue
+                locked = (state, side); break
+            if locked is None:
+                if not end_covered: audit["right_censored"] += 1
+                elif not gaps: audit["no_entry_complete_coverage"] += 1
+                continue
+            state, side = locked; source = state[f"{side}_row"]; result = scores.get(state["game_key"])
+            item = dict(source); item.update({"threshold": threshold, "entry_side": side, "decision_timestamp": state["observed_at_utc"], "signed_gap": state["signed_gap"], "locked": True})
+            if result:
+                try: item["outcome"] = settle_selection(state["market"], source.get("selection_side") or "", line_value(source.get("best_line")), result["away_score"], result["home_score"])
+                except (KeyError, TypeError, ValueError): item["outcome"] = None
+            later = [row for row in observed if _time(row["observed_at_utc"]) > _time(state["observed_at_utc"]) and float(row["signed_gap"]) * float(state["signed_gap"]) <= -threshold * threshold]
+            item["later_threshold_reversal"] = bool(later); output.append(item); audit["locked_entries"] += 1
+    return output, audit

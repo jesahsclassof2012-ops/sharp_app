@@ -2,7 +2,9 @@ from analysis.signal_model_benchmark import (
     binary_metrics, chronological_game_folds, decision_rows, derived_split_features,
     edge_bucket, expected_value, leakage_safe_movement, no_vig_probability,
     calibration_buckets, edge_bucket_performance, run_walk_forward_benchmark,
-    select_training_edge_threshold, validated_no_vig_pair,
+    select_training_edge_threshold, validated_no_vig_pair, build_market_states,
+    select_landmark_states, market_state_movement, landmark_decision_rows,
+    direction_reversal_audit, threshold_lock_entries,
 )
 from history_store import game_key, signal_key
 
@@ -73,6 +75,91 @@ def test_diagnostics_are_raw_gap_and_safe_at_percentage_boundaries():
     values = derived_split_features(snapshot(bets_pct=40, money_pct=60))
     assert values["raw_gap"] == 20 and values["log_relative_wager_ratio"] is not None
     assert derived_split_features(snapshot(bets_pct=0, money_pct=60))["relative_wager_ratio"] is None
+
+
+def paired_state(*, market="Spread", observed="2026-01-02T17:00:00Z", gap=20, canonical_price=-110, opposite_price=-110):
+    canonical_side, opposite_side = ("over", "under") if market == "Total" else ("away", "home")
+    canonical_selection, opposite_selection = ("Over", "Under") if market == "Total" else ("A", "B")
+    canonical_line, opposite_line = ("o45.5", "u45.5") if market == "Total" else ("+3", "-3")
+    first = snapshot(market=market, selection=canonical_selection, selection_side=canonical_side,
+                     observed_at_utc=observed, bets_pct=40, money_pct=40 + gap,
+                     money_minus_bets_gap=gap, best_line=canonical_line, best_price=canonical_price)
+    second = snapshot(market=market, selection=opposite_selection, selection_side=opposite_side,
+                      observed_at_utc=observed, bets_pct=60, money_pct=60 - gap,
+                      money_minus_bets_gap=-gap, best_line=opposite_line, best_price=opposite_price)
+    return first, second
+
+
+def test_market_states_pair_orientation_validity_and_quote_independence():
+    rows = list(paired_state()) + list(paired_state(market="Total", observed="2026-01-02T17:05:00Z", gap=-12, canonical_price=None))
+    states, audit = build_market_states(rows)
+    assert len(states) == 2 and audit["valid_split_states"] == 2
+    spread, total = states
+    assert spread["canonical_selection_side"] == "away" and spread["signed_gap"] == 20 and spread["favored_side"] == "canonical"
+    assert total["canonical_selection_side"] == "over" and total["signed_gap"] == -12 and total["favored_side"] == "opposite"
+    assert total["canonical_best_price"] is None  # valid split state, unavailable quote
+
+
+def test_market_state_rejects_incomplete_duplicate_and_nonzero_sum_pairs():
+    first, second = paired_state()
+    _, incomplete = build_market_states([first])
+    _, duplicate = build_market_states([first, dict(first, selection="C")])
+    bad = dict(second, money_minus_bets_gap=-19, money_pct=41)
+    _, nonzero = build_market_states([first, bad])
+    assert incomplete["incomplete_pairs"] == 1
+    assert duplicate["incomplete_pairs"] + duplicate["duplicate_sides"] == 1
+    assert nonzero["zero_sum_failures"] == 1
+
+
+def test_landmarks_are_backward_only_and_choose_latest_usable_quote():
+    usable = paired_state(observed="2026-01-02T16:30:00Z")
+    unusable = paired_state(observed="2026-01-02T16:50:00Z", canonical_price=None)
+    post_target = paired_state(observed="2026-01-02T17:05:00Z")
+    states, _ = build_market_states([*usable, *unusable, *post_target])
+    selected, coverage = select_landmark_states(states, horizons=(180,))
+    assert len(selected) == 1 and selected[0]["observed_at_utc"] == "2026-01-02T16:30:00Z"
+    assert coverage["T-180m"]["usable_landmark_rows"] == 1
+
+
+def test_market_movement_uses_prior_paired_state_without_quote_or_signal_identity():
+    prior = paired_state(observed="2026-01-02T16:00:00Z", gap=8, canonical_price=None)
+    current = paired_state(observed="2026-01-02T17:00:00Z", gap=-5)
+    states, _ = build_market_states([*prior, *current])
+    assert market_state_movement(states[1], states) == -13
+
+
+def test_canonical_landmark_settlement_and_separate_horizons():
+    early = paired_state(observed="2026-01-02T14:00:00Z", market="Spread")
+    later = paired_state(observed="2026-01-02T17:00:00Z", market="Spread")
+    states, _ = build_market_states([*early, *later])
+    rows, _ = landmark_decision_rows(states, [{"game_key": early[0]["game_key"], "away_score": 24, "home_score": 20}])
+    assert {row["landmark_horizon_minutes"] for row in rows} == {360, 180}
+    assert all(row["selection_side"] == "away" and row["outcome"] == "win" for row in rows)
+
+
+def test_raw_flips_and_threshold_material_reversals_keep_regimes_through_zero():
+    rows = []
+    for index, gap in enumerate((15, 3, 0, -2, -8, 9)):
+        stamp = f"2026-01-02T{12 + index:02}:00:00Z"
+        rows.extend(paired_state(observed=stamp, gap=gap))
+    states, _ = build_market_states(rows)
+    audit = next(iter(direction_reversal_audit(states).values()))
+    assert audit["raw_flip_count"] == 2
+    assert audit["material"][5]["count"] == 2
+    assert audit["material"][10]["count"] == 0
+
+
+def test_threshold_lock_policy_skips_nonexecutable_then_locks_once_and_records_reversal():
+    start = "2026-01-02T20:00:00Z"
+    anchor = paired_state(observed="2026-01-01T20:00:00Z", gap=2)
+    nonexec = paired_state(observed="2026-01-01T20:30:00Z", gap=10, canonical_price=None)
+    executable = paired_state(observed="2026-01-01T21:00:00Z", gap=10)
+    reversal = paired_state(observed="2026-01-01T21:30:00Z", gap=-12)
+    raw = [dict(row, event_start_utc=start) for row in [*anchor, *nonexec, *executable, *reversal]]
+    states, _ = build_market_states(raw)
+    entries, audit = threshold_lock_entries(states, [{"game_key": raw[0]["game_key"], "away_score": 24, "home_score": 20}], thresholds=(5,))
+    assert len(entries) == 1 and entries[0]["entry_side"] == "canonical" and entries[0]["later_threshold_reversal"]
+    assert audit["non_executable_qualifying_states"] == 1 and audit["locked_entries"] == 1
 
 
 def test_one_baseline_decision_and_push_binary_exclusion():
