@@ -356,9 +356,28 @@ def _raw_market_predictions(test: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return output
 
 
+def primary_model_eligible(row: dict[str, Any]) -> bool:
+    """Predeclared common cohort for Models 0A–3.
+
+    The raw baseline is deliberately restricted to the same feature-complete
+    decision rows as every challenger.  That makes every primary OOS comparison
+    a matched comparison rather than silently changing its test population.
+    """
+    if not row.get("game_key") or not row.get("signal_key") or row.get("raw_gap") is None:
+        return False
+    try:
+        _time(row["event_start_utc"])
+        _time(row["decision_timestamp"] if row.get("decision_timestamp") else row["observed_at_utc"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return model_features(row, "Model 3") is not None
+
+
 def run_walk_forward_benchmark(rows: Iterable[dict[str, Any]], folds: int = 3) -> dict[str, Any]:
     """Run fixed, chronological OOS models.  No test data informs fitting."""
-    all_rows = list(rows); fold_pairs = chronological_game_folds(all_rows, folds)
+    # Keep Models 0A–3 on exactly the same feature-complete rows in every fold.
+    all_rows = [row for row in rows if primary_model_eligible(row)]
+    fold_pairs = chronological_game_folds(all_rows, folds)
     predictions: dict[str, list[dict[str, Any]]] = defaultdict(list); fold_metrics = []
     for fold_id, (train, test) in enumerate(fold_pairs):
         predicted = _raw_market_predictions(test)
