@@ -107,6 +107,7 @@ def test_requested_history_loads_and_stays_loaded_across_reruns(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://test")
     monkeypatch.setattr(app, "st", fake_st)
     monkeypatch.setattr(app, "HistoryStore", create_store)
+    fake_st.session_state["history_view"] = "Legacy baseline"
 
     app.render_history()
     fake_st.load_history = False
@@ -133,6 +134,7 @@ def test_requested_history_failure_is_isolated(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://test")
     monkeypatch.setattr(app, "st", fake_st)
     monkeypatch.setattr(app, "HistoryStore", FailingHistoryStore)
+    fake_st.session_state["history_view"] = "Legacy baseline"
 
     app.render_history()
 

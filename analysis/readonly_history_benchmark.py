@@ -26,6 +26,7 @@ from analysis.signal_model_benchmark import (
     run_walk_forward_benchmark,
     threshold_lock_entries,
 )
+from analysis.research_readiness import MAIN_GATES, MOVEMENT_GATES, sufficiency_gate
 from history_store import american_profit, calculate_clv, executable_pregame, line_value
 
 
@@ -55,19 +56,6 @@ FORBIDDEN_SQL = (
     "set role", "security definer", "begin", "commit", "rollback",
 )
 
-MAIN_GATES = {
-    "unique_settled_games": 100,
-    "binary_rows": 200,
-    "distinct_event_dates": 5,
-    "folds": 3,
-    "test_games_per_fold": 20,
-}
-MOVEMENT_GATES = {
-    "unique_settled_games": 60,
-    "binary_rows": 100,
-    "folds": 3,
-    "test_games_per_fold": 10,
-}
 MIN_DIAGNOSTIC_ROWS = 20
 MIN_ROI_BOOTSTRAP_GAMES = 20
 REPORT_AUDIT_KEYS = {
@@ -252,27 +240,6 @@ def _time_distribution(values: list[float]) -> dict[str, int]:
         elif value <= 720: buckets[">180-720"] += 1
         else: buckets[">720"] += 1
     return buckets
-
-
-def sufficiency_gate(entries: list[dict[str, Any]], movement: bool = False) -> dict[str, Any]:
-    """Predeclared gate evaluated before any fit or model metric is produced."""
-    # The gate measures the exact common primary population, not a looser set
-    # that one challenger might later be unable to score.
-    cohort = [row for row in entries if primary_model_eligible(row)]
-    if movement:
-        cohort = [row for row in cohort if row.get("movement_60m") is not None]
-    binary = [row for row in cohort if row.get("binary_target") is not None]
-    gates = MOVEMENT_GATES if movement else MAIN_GATES
-    folds = chronological_game_folds(cohort, folds=gates["folds"])
-    failures = []
-    if len({row["game_key"] for row in cohort}) < gates["unique_settled_games"]: failures.append("unique settled games")
-    if len(binary) < gates["binary_rows"]: failures.append("binary W/L rows")
-    if not movement and len({_date(row.get("event_start_utc")) for row in cohort if _date(row.get("event_start_utc"))}) < gates["distinct_event_dates"]: failures.append("distinct event dates")
-    if len(folds) < gates["folds"]: failures.append("valid chronological folds")
-    for train, test in folds:
-        if len({row["game_key"] for row in test}) < gates["test_games_per_fold"]: failures.append("test games per fold"); break
-        if len({row.get("binary_target") for row in train if row.get("binary_target") is not None}) < 2: failures.append("both training outcome classes"); break
-    return {"passed": not failures, "failures": failures, "folds": folds, "cohort": cohort}
 
 
 def _bootstrap_deltas(predictions: dict[str, list[dict[str, Any]]], challenger: str, baseline: str, seed: int = 20260917, rounds: int = 200) -> dict[str, Any] | None:
