@@ -101,6 +101,7 @@ def connect_readonly():
             database_url,
             autocommit=True,
             options=CONNECTION_OPTIONS,
+            sslmode="require",
             row_factory=dict_row,
         )
     except BenchmarkSafetyError:

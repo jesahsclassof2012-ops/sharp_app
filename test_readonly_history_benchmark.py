@@ -1,4 +1,6 @@
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
@@ -41,6 +43,27 @@ def test_missing_readonly_database_url_fails_closed(monkeypatch):
     monkeypatch.delenv("READONLY_DATABASE_URL", raising=False)
     with pytest.raises(benchmark.BenchmarkSafetyError, match="READONLY_DATABASE_URL is required"):
         benchmark.connect_readonly()
+
+
+def test_readonly_connection_requires_ssl_without_exposing_connection_string(monkeypatch, capsys):
+    captured = {}
+    fake_psycopg = types.ModuleType("psycopg")
+    fake_rows = types.ModuleType("psycopg.rows")
+    fake_rows.dict_row = object()
+    def connect(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return object()
+    fake_psycopg.connect = connect
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+    monkeypatch.setitem(sys.modules, "psycopg.rows", fake_rows)
+    secret_url = "postgresql://secret-value@host/benchmark"
+    monkeypatch.setenv("READONLY_DATABASE_URL", secret_url)
+    benchmark.connect_readonly()
+    assert captured["kwargs"]["sslmode"] == "require"
+    assert captured["kwargs"]["autocommit"] is True
+    assert captured["kwargs"]["options"] == benchmark.CONNECTION_OPTIONS
+    assert secret_url not in capsys.readouterr().out
 
 
 def test_wrong_reader_role_and_readonly_off_fail_before_data_reads():
