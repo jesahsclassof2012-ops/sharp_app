@@ -76,3 +76,5 @@ def test_research_cache_is_sport_scoped(monkeypatch):
     monkeypatch.setattr(app, "read_research_history", lambda sport: (calls.append(sport) or ([], [])))
     app.cached_market_state_history.clear(); app.cached_market_state_history("NFL"); app.cached_market_state_history("NFL"); app.cached_market_state_history("MLB")
     assert calls == ["NFL", "MLB"]
+    app.cached_market_state_history.clear(); app.cached_market_state_history("NFL")
+    assert calls == ["NFL", "MLB", "NFL"]
