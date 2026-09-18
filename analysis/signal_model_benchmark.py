@@ -460,7 +460,7 @@ def build_market_states(snapshots: Iterable[dict[str, Any]]) -> tuple[list[dict[
         if row.get("game_key") and row.get("market") in CANONICAL_SIDES and row.get("observed_at_utc"):
             grouped[(str(row["game_key"]), str(row["market"]), str(row["observed_at_utc"]))].append(row)
     states: list[dict[str, Any]] = []
-    audit = {"complete_pairs": 0, "incomplete_pairs": 0, "duplicate_sides": 0, "malformed_pairs": 0, "zero_sum_failures": 0, "share_sum_failures": 0, "data_quality_failures": 0, "valid_split_states": 0,
+    audit = {"complete_pairs": 0, "incomplete_pairs": 0, "duplicate_sides": 0, "malformed_pairs": 0, "zero_sum_failures": 0, "share_sum_failures": 0, "non_ok_data_quality_pairs": 0, "canonical_non_ok_data_quality": 0, "opposite_non_ok_data_quality": 0, "valid_split_states": 0,
              "canonical_executable_quote_available": 0, "canonical_executable_quote_missing": 0, "opposite_executable_quote_available": 0, "opposite_executable_quote_missing": 0, "both_executable": 0, "neither_executable": 0}
     for (game, market, observed), rows in grouped.items():
         canonical_side, opposite_side = CANONICAL_SIDES[market]
@@ -474,11 +474,11 @@ def build_market_states(snapshots: Iterable[dict[str, Any]]) -> tuple[list[dict[
             audit["duplicate_sides"] += 1
             continue
         canonical, opposite = sides[canonical_side][0], sides[opposite_side][0]
-        canonical_gap, opposite_gap = _gap(canonical), _gap(opposite)
-        if canonical.get("data_quality", "OK") != "OK" or opposite.get("data_quality", "OK") != "OK":
-            audit["data_quality_failures"] += 1
-            continue
         identity_consistent = canonical.get("event_start_utc") == opposite.get("event_start_utc") and (not canonical.get("sport") or not opposite.get("sport") or canonical.get("sport") == opposite.get("sport")) and (not canonical.get("matchup") or not opposite.get("matchup") or canonical.get("matchup") == opposite.get("matchup"))
+        try:
+            _time(canonical.get("event_start_utc")); _time(opposite.get("event_start_utc"))
+        except (TypeError, ValueError):
+            identity_consistent = False
         try:
             shares = [float(value) for value in (canonical.get("bets_pct"), canonical.get("money_pct"), opposite.get("bets_pct"), opposite.get("money_pct"))]
         except (TypeError, ValueError):
@@ -489,6 +489,7 @@ def build_market_states(snapshots: Iterable[dict[str, Any]]) -> tuple[list[dict[
         if not shares_complementary:
             audit["share_sum_failures"] += 1
             continue
+        canonical_gap, opposite_gap = _gap(canonical), _gap(opposite)
         if canonical_gap is None or opposite_gap is None:
             audit["malformed_pairs"] += 1
             continue
@@ -498,6 +499,14 @@ def build_market_states(snapshots: Iterable[dict[str, Any]]) -> tuple[list[dict[
         if abs(canonical_gap + opposite_gap) > MARKET_GAP_SUM_TOLERANCE:
             audit["zero_sum_failures"] += 1
             continue
+        canonical_quality_ok = canonical.get("data_quality", "OK") == "OK"
+        opposite_quality_ok = opposite.get("data_quality", "OK") == "OK"
+        if not canonical_quality_ok or not opposite_quality_ok:
+            audit["non_ok_data_quality_pairs"] += 1
+        if not canonical_quality_ok:
+            audit["canonical_non_ok_data_quality"] += 1
+        if not opposite_quality_ok:
+            audit["opposite_non_ok_data_quality"] += 1
         signed = canonical_gap
         favored = "canonical" if signed > 0 else "opposite" if signed < 0 else "none"
         states.append({
@@ -526,7 +535,11 @@ def _quote_usable(state: dict[str, Any], side: str = "canonical") -> bool:
     """Execution validation applies after split pairing, never during it."""
     prefix = "canonical" if side == "canonical" else "opposite"
     row = state.get(f"{prefix}_row") or {}
-    if row.get("best_price") in (None, 0):
+    try:
+        odds = int(row.get("best_price"))
+    except (TypeError, ValueError):
+        return False
+    if odds == 0 or implied_probability(odds) is None:
         return False
     try:
         pregame = _time(state["observed_at_utc"]) < _time(state["event_start_utc"])

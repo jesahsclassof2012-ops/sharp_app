@@ -113,13 +113,48 @@ def test_market_state_rejects_incomplete_duplicate_and_nonzero_sum_pairs():
     assert nonzero["zero_sum_failures"] == 1
 
 
-def test_market_state_rejects_bad_percentages_gap_identity_and_data_quality():
+def test_market_state_rejects_bad_percentages_gap_and_identity():
     first, second = paired_state()
-    cases = ((dict(first, bets_pct=-1), second), (dict(first, money_pct=101), second), (dict(first, money_minus_bets_gap=19), second), (dict(first, data_quality="invalid_total"), second), (first, dict(second, event_start_utc="2026-01-02T21:00:00Z")))
+    cases = ((dict(first, bets_pct=-1), second), (dict(first, money_pct=101), second), (dict(first, money_minus_bets_gap=19), second), (first, dict(second, event_start_utc="2026-01-02T21:00:00Z")))
     for left, right in cases:
         states, audit = build_market_states([left, right])
         assert states == []
-        assert audit["malformed_pairs"] + audit["data_quality_failures"] + audit["share_sum_failures"] == 1
+        assert audit["malformed_pairs"] + audit["share_sum_failures"] == 1
+
+
+def test_non_ok_quote_quality_is_audit_only_for_structurally_valid_split_states():
+    canonical, opposite = paired_state(canonical_price=None)
+    canonical["data_quality"] = "invalid odds"
+    states, audit = build_market_states([canonical, opposite])
+    assert len(states) == audit["valid_split_states"] == 1
+    assert audit["non_ok_data_quality_pairs"] == audit["canonical_non_ok_data_quality"] == 1
+    assert audit["opposite_non_ok_data_quality"] == 0
+    assert audit["canonical_executable_quote_missing"] == audit["opposite_executable_quote_available"] == 1
+    assert signal_model_benchmark._quote_usable(states[0], "canonical") is False
+    invalid_price, valid_opposite = paired_state(canonical_price="N/A")
+    invalid_price["data_quality"] = "invalid odds"
+    invalid_states, _ = build_market_states([invalid_price, valid_opposite])
+    assert len(invalid_states) == 1 and signal_model_benchmark._quote_usable(invalid_states[0], "canonical") is False
+
+
+def test_both_missing_quote_quality_and_total_quote_quality_remain_structural_history():
+    first, second = paired_state(canonical_price=None, opposite_price=None)
+    first["data_quality"] = second["data_quality"] = "invalid odds"
+    states, audit = build_market_states([first, second])
+    assert len(states) == 1 and audit["neither_executable"] == audit["non_ok_data_quality_pairs"] == 1
+    over, under = paired_state(market="Total", canonical_price=None, opposite_price=None)
+    over["data_quality"] = under["data_quality"] = "invalid odds; missing total"
+    total_states, total_audit = build_market_states([over, under])
+    assert len(total_states) == 1 and total_audit["neither_executable"] == 1
+    assert signal_model_benchmark._quote_usable(total_states[0], "canonical") is False
+
+
+def test_non_ok_quality_with_structural_corruption_is_rejected_by_structure():
+    first, second = paired_state()
+    first.update(bets_pct=120, data_quality="invalid percentage; invalid odds")
+    states, audit = build_market_states([first, second])
+    assert states == [] and audit["malformed_pairs"] == 1
+    assert audit["non_ok_data_quality_pairs"] == 0
 
 
 def test_complementary_share_tolerance_accepts_rounding_and_audits_failures():
@@ -137,11 +172,12 @@ def test_complementary_share_tolerance_accepts_rounding_and_audits_failures():
 def test_landmarks_are_backward_only_and_choose_latest_usable_quote():
     usable = paired_state(observed="2026-01-02T16:30:00Z")
     unusable = paired_state(observed="2026-01-02T16:50:00Z", canonical_price=None)
+    unusable[0]["data_quality"] = "invalid odds"
     post_target = paired_state(observed="2026-01-02T17:05:00Z")
     states, _ = build_market_states([*usable, *unusable, *post_target])
     selected, coverage = select_landmark_states(states, horizons=(180,))
-    assert len(selected) == 1 and selected[0]["observed_at_utc"] == "2026-01-02T16:30:00Z"
-    assert coverage["T-180m"]["usable_landmark_rows"] == 1
+    assert len(states) == 3 and len(selected) == 1 and selected[0]["observed_at_utc"] == "2026-01-02T16:30:00Z"
+    assert coverage["T-180m"]["valid_paired_state_in_window"] == coverage["T-180m"]["usable_landmark_rows"] == 1
 
 
 def test_landmark_coverage_uses_raw_universe_even_without_valid_pair():
@@ -154,9 +190,11 @@ def test_landmark_coverage_uses_raw_universe_even_without_valid_pair():
 
 def test_market_movement_uses_prior_paired_state_without_quote_or_signal_identity():
     prior = paired_state(observed="2026-01-02T16:00:00Z", gap=8, canonical_price=None)
+    prior[0]["data_quality"] = "invalid odds"
     current = paired_state(observed="2026-01-02T17:00:00Z", gap=-5)
     states, _ = build_market_states([*prior, *current])
     assert market_state_movement(states[1], states) == -13
+    assert next(iter(direction_reversal_audit(states).values()))["raw_flip_count"] == 1
 
 
 def test_canonical_landmark_settlement_and_separate_horizons():

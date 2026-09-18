@@ -21,6 +21,13 @@ Paired Bets% and Money% each must sum to approximately 100, with a one
 percentage-point rounding tolerance; malformed share pairs are audited rather
 than normalized.
 
+Global `data_quality` combines structural split and quote-related parser flags.
+It is therefore audited, not used as a blanket split-state veto: explicit paired
+share, gap, side, and identity checks determine structural validity. A
+structurally valid state without an executable quote remains available for split
+coverage, movement, and reversal history, while model and entry selection still
+require a usable quote.
+
 Primary cohorts are fixed T-6h, T-3h, and T-1h landmarks. Each uses only the
 latest usable canonical quote at or before the target and within 45 minutes
 before it; post-target observations are never used. The canonical away/over
