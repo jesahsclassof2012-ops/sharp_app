@@ -676,10 +676,11 @@ def render_market_state_research() -> None:
     funnel = []
     for name in ("T-6h", "T-3h", "T-1h"):
         coverage = operational["by_horizon"][name]
-        funnel.append({"Decision time": name, "Observed": coverage["observed_game_markets"], "Decision time reached": coverage["matured"], "Pending": coverage["pending"], "Usable": coverage["usable_landmark"], "Capture rate": _capture_rate(coverage["capture_rate"]), "Settled": len(data["by_horizon"][name]), "MAIN": readiness_label(data["readiness"][name]["main"]), "MOVEMENT": readiness_label(data["readiness"][name]["movement"])})
+        funnel.append({"Decision time": name, "Observed": coverage["observed_game_markets"], "Decision time reached": coverage["matured"], "Pending": coverage["pending"], "Usable": coverage["usable_landmark"], "Capture rate": _capture_rate(coverage["capture_rate"]), "Settled landmark observations": len(data["by_horizon"][name]), "MAIN": readiness_label(data["readiness"][name]["main"]), "MOVEMENT": readiness_label(data["readiness"][name]["movement"])})
     st.dataframe(pd.DataFrame(funnel), use_container_width=True, hide_index=True)
     st.caption("Pending game-markets have not reached this decision time in the stored history and are excluded from capture-rate failures.")
     st.caption("Stored snapshots are repeated measurements through time. They are not independent bets or independent model examples.")
+    st.caption("Settled landmark observations can include multiple markets from one game. Use Eligible settled games under Benchmark progress for the independent-game count.")
     horizon = st.selectbox("Decision time", ["T-6h", "T-3h", "T-1h"], key="research_decision_time")
     state, progress = data["readiness"][horizon], data["progress"][horizon]
     st.subheader("Benchmark progress")
