@@ -49,7 +49,7 @@ def research_data(main_failures=(), movement_failures=()):
     coverage = {"observed_game_markets": 1, "matured": 1, "pending": 0, "usable_landmark": 1, "paired_state_in_window_but_no_usable_quote": 0, "too_stale": 0, "appeared_after_decision_time": 0, "no_valid_paired_state": 0, "capture_rate": 1.0, "stale_timing": {"count": 0, "p50": None, "p75": None, "p90": None}, "late_timing": {"count": 0, "p50": None, "p75": None, "p90": None}}
     operational = {"as_of": "2026-01-02T19:00:00Z", "by_horizon": {name: dict(coverage) for name in ("T-6h", "T-3h", "T-1h")}}
     readiness = {name: {"main": gate(main_failures), "movement": gate(movement_failures)} for name in ("T-6h", "T-3h", "T-1h")}
-    progress = {name: {"main": {"games": 1, "binary_rows": 1, "event_dates": 1, "folds": 0, "game_goal": 100, "binary_goal": 200, "event_date_goal": 5, "fold_goal": 3}, "movement": {"games": 0, "binary_rows": 0, "event_dates": 0, "folds": 0, "game_goal": 60, "binary_goal": 100, "event_date_goal": None, "fold_goal": 3}} for name in readiness}
+    progress = {name: {"main": {"games": 1, "binary_rows": 1, "event_dates": 1, "folds": 0, "folds_formed": 0, "min_test_games_per_fold": 0, "training_folds_with_both_outcomes": 0, "total_training_folds": 0, "game_goal": 100, "binary_goal": 200, "event_date_goal": 5, "fold_goal": 3, "test_games_per_fold_goal": 20}, "movement": {"games": 0, "binary_rows": 0, "event_dates": 0, "folds": 0, "folds_formed": 0, "min_test_games_per_fold": 0, "training_folds_with_both_outcomes": 0, "total_training_folds": 0, "game_goal": 60, "binary_goal": 100, "event_date_goal": None, "fold_goal": 3, "test_games_per_fold_goal": 10}} for name in readiness}
     breakdowns = {"by_market": {"Spread": operational}, "by_sport": {"NFL": {"coverage": operational, "observed_game_markets": 1, "recorded_results": 1}}, "by_event_date": {"2026-01-02": operational}}
     return {"snapshots": [{"sport": "NFL"}], "summary": {"stored_observations": 1, "unique_games": 1, "unique_game_markets": 1, "valid_states": 1, "recorded_results": 1, "non_ok_retained": 0}, "coverage": {"T-360m": {}, "T-180m": {}, "T-60m": {}}, "operational_coverage": operational, "operational_breakdowns": breakdowns, "progress": progress, "by_horizon": {"T-6h": rows, "T-3h": [], "T-1h": []}, "readiness": readiness}
 
@@ -201,3 +201,28 @@ def test_gate_progress_uses_exact_gate_cohort_and_shared_thresholds():
     main, movement = gate_progress(gate), gate_progress(gate, True)
     assert (main["games"], main["binary_rows"], main["event_dates"], main["game_goal"], main["binary_goal"], main["event_date_goal"], main["fold_goal"]) == (2, 1, 2, 100, 200, 5, 3)
     assert (movement["games"], movement["binary_rows"], movement["game_goal"], movement["binary_goal"], movement["event_date_goal"], movement["fold_goal"]) == (2, 1, 60, 100, None, 3)
+
+
+def test_gate_progress_exposes_smallest_test_fold_and_training_class_progress():
+    train_both = [{"game_key": "a", "binary_target": 0}, {"game_key": "b", "binary_target": 1}]
+    train_one_class = [{"game_key": "c", "binary_target": 1}]
+    gate = {"passed": False, "cohort": [], "folds": [(train_both, [{"game_key": "t1"}, {"game_key": "t2"}]), (train_both, [{"game_key": "t3"}]), (train_one_class, [{"game_key": "t4"}, {"game_key": "t5"}, {"game_key": "t6"}])]} 
+    progress = gate_progress(gate)
+    assert (progress["folds_formed"], progress["fold_goal"], progress["min_test_games_per_fold"], progress["test_games_per_fold_goal"]) == (3, 3, 1, 20)
+    assert (progress["training_folds_with_both_outcomes"], progress["total_training_folds"]) == (2, 3)
+
+
+def test_benchmark_progress_uses_formed_fold_wording_not_valid_fold_wording(monkeypatch):
+    fake = FakeResearchStreamlit()
+    data = research_data()
+    data["progress"]["T-6h"]["main"].update(folds_formed=3, min_test_games_per_fold=8, training_folds_with_both_outcomes=3, total_training_folds=3)
+    data["progress"]["T-6h"]["movement"].update(folds_formed=3, min_test_games_per_fold=4, training_folds_with_both_outcomes=2, total_training_folds=3)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test")
+    monkeypatch.setattr(app, "st", fake); monkeypatch.setattr(app, "cached_market_state_history", lambda sport: data)
+    app.render_history()
+    joined = "\n".join(fake.text)
+    assert "Chronological folds formed: 3 / 3" in joined
+    assert "Minimum test games in any fold: 8 / 20" in joined
+    assert "Minimum test games in any fold: 4 / 10" in joined
+    assert "Training folds with both outcomes: 2 / 3" in joined
+    assert "Valid chronological folds" not in joined

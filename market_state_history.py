@@ -104,7 +104,10 @@ def gate_progress(gate: dict[str, Any], movement: bool = False) -> dict[str, int
     binary = [row for row in cohort if row.get("binary_target") is not None]
     dates = {_timestamp(row.get("event_start_utc")).date().isoformat() for row in cohort if _timestamp(row.get("event_start_utc"))}
     gates = MOVEMENT_GATES if movement else MAIN_GATES
-    return {"games": len({row.get("game_key") for row in cohort if row.get("game_key")}), "binary_rows": len(binary), "event_dates": len(dates), "folds": len(gate.get("folds", [])), "game_goal": gates["unique_settled_games"], "binary_goal": gates["binary_rows"], "fold_goal": gates["folds"], "event_date_goal": gates.get("distinct_event_dates"), "passed": bool(gate.get("passed"))}
+    folds = gate.get("folds", [])
+    test_game_counts = [len({row.get("game_key") for row in test if row.get("game_key")}) for _, test in folds]
+    training_with_both_outcomes = sum(len({row.get("binary_target") for row in train if row.get("binary_target") is not None}) >= 2 for train, _ in folds)
+    return {"games": len({row.get("game_key") for row in cohort if row.get("game_key")}), "binary_rows": len(binary), "event_dates": len(dates), "folds": len(folds), "folds_formed": len(folds), "min_test_games_per_fold": min(test_game_counts, default=0), "training_folds_with_both_outcomes": training_with_both_outcomes, "total_training_folds": len(folds), "game_goal": gates["unique_settled_games"], "binary_goal": gates["binary_rows"], "fold_goal": gates["folds"], "test_games_per_fold_goal": gates["test_games_per_fold"], "event_date_goal": gates.get("distinct_event_dates"), "passed": bool(gate.get("passed"))}
 
 
 def operational_capture_breakdowns(snapshots: list[dict[str, Any]], states: list[dict[str, Any]], results: list[dict[str, Any]], as_of: Any = None) -> dict[str, Any]:

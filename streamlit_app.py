@@ -687,7 +687,8 @@ def render_market_state_research() -> None:
         st.markdown(f"**{label} — {readiness_label(state[label.lower()])}**")
         game_label = "Movement-qualified settled games" if movement else "Eligible settled games"
         binary_label = "Movement-qualified win/loss rows" if movement else "Win/loss rows"
-        st.caption(f"{game_label}: {values['games']} / {values['game_goal']} · {binary_label}: {values['binary_rows']} / {values['binary_goal']} · Valid chronological folds: {values['folds']} / {values['fold_goal']}")
+        st.caption(f"{game_label}: {values['games']} / {values['game_goal']} · {binary_label}: {values['binary_rows']} / {values['binary_goal']} · Chronological folds formed: {values['folds_formed']} / {values['fold_goal']}")
+        st.caption(f"Minimum test games in any fold: {values['min_test_games_per_fold']} / {values['test_games_per_fold_goal']} · Training folds with both outcomes: {values['training_folds_with_both_outcomes']} / {values['total_training_folds']}")
         if not movement:
             st.caption(f"Event dates: {values['event_dates']} / {values['event_date_goal']}")
         if state[label.lower()]["failures"]:
