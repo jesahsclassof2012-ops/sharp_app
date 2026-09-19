@@ -65,6 +65,22 @@ def test_market_state_ui_is_default_separate_and_never_uses_legacy_analytics(mon
     assert any("MAIN" in item for item in fake.text)
 
 
+def test_research_funnel_labels_settled_landmark_observations_without_changing_counts(monkeypatch):
+    fake = FakeResearchStreamlit()
+    data = research_data()
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test")
+    monkeypatch.setattr(app, "st", fake)
+    monkeypatch.setattr(app, "cached_market_state_history", lambda sport: data)
+    app.render_history()
+    funnel = next(frame for frame in fake.frames if "Decision time" in frame.columns and "Capture rate" in frame.columns)
+    assert "Settled landmark observations" in funnel.columns
+    assert "Settled" not in funnel.columns
+    assert funnel.loc[funnel["Decision time"] == "T-6h", "Settled landmark observations"].iloc[0] == 1
+    joined = "\n".join(fake.text)
+    assert "can include multiple markets from one game" in joined
+    assert "Eligible settled games under Benchmark progress" in joined
+
+
 def test_readiness_failures_stay_separate_and_recent_horizon_is_scoped(monkeypatch):
     fake = FakeResearchStreamlit(horizon="T-3h")
     data = research_data(("unique settled games", "distinct event dates"), ("binary W/L rows", "test games per fold")); data["by_horizon"]["T-3h"] = data["by_horizon"]["T-6h"]
