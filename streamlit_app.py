@@ -659,6 +659,10 @@ def market_state_recent_rows(rows: list[dict[str, Any]], limit: int = 20) -> pd.
     return pd.DataFrame([{"Event start": row.get("event_start_utc"), "Sport": row.get("sport"), "Matchup": row.get("matchup"), "Market": row.get("market"), "Reference selection": row.get("selection"), "Captured line": row.get("best_line"), "Captured price": format_price(row.get("best_price")), "Bets %": format_percent(row.get("bets_pct")), "Money %": format_percent(row.get("money_pct")), "Signed gap": format_gap(row.get("signed_gap")), "Gap Δ 60m": format_gap(row.get("movement_60m")), "Reference outcome": row.get("outcome")} for row in sorted(rows, key=lambda item: str(item.get("event_start_utc") or ""), reverse=True)[:limit]])
 
 
+def _capture_rate(value: Any) -> str:
+    return "N/A" if value is None else f"{float(value):.0%}"
+
+
 def render_market_state_research() -> None:
     """Coverage/readiness only: never fits a model or calls legacy analytics."""
     all_data = cached_market_state_history("All sports")
@@ -667,37 +671,76 @@ def render_market_state_research() -> None:
     data = all_data if scope == "All sports" else cached_market_state_history(scope)
     if st.button("Refresh history", key="refresh_research_history"):
         cached_market_state_history.clear(); st.rerun()
-    st.caption("Stored observations are repeated snapshots collected through time. Opposite sides from the same game market and observation time are combined into one market state.")
-    with st.container(horizontal=True, wrap=True, gap="small"):
-        for label, value in (("Stored observations", data["summary"]["stored_observations"]), ("Unique games observed", data["summary"]["unique_games"]), ("Valid paired market states", data["summary"]["valid_states"]), ("Recorded game results", data["summary"]["recorded_results"]), ("Non-OK paired states retained", data["summary"]["non_ok_retained"])):
-            st.metric(label, value, width="content")
-    st.subheader("Landmark coverage")
-    mapping = {"raw_game_markets_considered": "Raw game-markets", "no_valid_paired_state": "No valid pair", "valid_paired_state_only_after_target": "Only after decision time", "valid_paired_state_before_target_but_stale": "Too stale", "valid_paired_state_in_45m_window": "Valid in window", "paired_state_in_window_but_no_usable_canonical_quote": "No usable quote", "usable_landmark_row": "Usable landmark"}
-    coverage = []
-    for label, source in (("T-6h", "T-360m"), ("T-3h", "T-180m"), ("T-1h", "T-60m")):
-        coverage.append({"Decision time": label, **{display: data["coverage"].get(source, {}).get(key, 0) for key, display in mapping.items()}})
-    st.dataframe(pd.DataFrame(coverage), use_container_width=True, hide_index=True)
-    st.caption("A usable landmark means a valid paired market state with an executable reference-side quote was captured during the 45 minutes before that decision time.")
-    counts = [(name, len(data["by_horizon"][name])) for name in ("T-6h", "T-3h", "T-1h")]
-    st.caption(" · ".join(f"{name} settled observations: {count}" for name, count in counts) + ". A game-market can contribute at more than one decision time; do not add these as independent bets.")
-    st.subheader("Model readiness")
+    operational = data["operational_coverage"]
+    st.subheader("Research funnel")
+    funnel = []
     for name in ("T-6h", "T-3h", "T-1h"):
-        state = data["readiness"][name]
-        st.markdown(f"**{name}**")
-        for label, gate, movement in (("MAIN", state["main"], False), ("MOVEMENT", state["movement"], True)):
-            st.caption(f"{label} — {readiness_label(gate)}")
-            if gate["failures"]:
-                messages = readable_failures(gate["failures"])
-                if movement:
-                    messages = messages.replace("Not enough settled games", "Not enough movement-qualified settled games").replace("Not enough win/loss rows", "Not enough movement-qualified win/loss rows")
-                st.caption(messages)
-    horizon = st.selectbox("Recent landmark horizon", ["T-6h", "T-3h", "T-1h"], key="recent_landmark_horizon")
+        coverage = operational["by_horizon"][name]
+        funnel.append({"Decision time": name, "Observed": coverage["observed_game_markets"], "Decision time reached": coverage["matured"], "Pending": coverage["pending"], "Usable": coverage["usable_landmark"], "Capture rate": _capture_rate(coverage["capture_rate"]), "Settled": len(data["by_horizon"][name]), "MAIN": readiness_label(data["readiness"][name]["main"]), "MOVEMENT": readiness_label(data["readiness"][name]["movement"])})
+    st.dataframe(pd.DataFrame(funnel), use_container_width=True, hide_index=True)
+    st.caption("Pending game-markets have not reached this decision time in the stored history and are excluded from capture-rate failures.")
+    st.caption("Stored snapshots are repeated measurements through time. They are not independent bets or independent model examples.")
+    horizon = st.selectbox("Decision time", ["T-6h", "T-3h", "T-1h"], key="research_decision_time")
+    state, progress = data["readiness"][horizon], data["progress"][horizon]
+    st.subheader("Benchmark progress")
+    for label, values, movement in (("MAIN", progress["main"], False), ("MOVEMENT", progress["movement"], True)):
+        st.markdown(f"**{label} — {readiness_label(state[label.lower()])}**")
+        game_label = "Movement-qualified settled games" if movement else "Eligible settled games"
+        binary_label = "Movement-qualified win/loss rows" if movement else "Win/loss rows"
+        st.caption(f"{game_label}: {values['games']} / {values['game_goal']} · {binary_label}: {values['binary_rows']} / {values['binary_goal']} · Chronological folds formed: {values['folds_formed']} / {values['fold_goal']}")
+        st.caption(f"Minimum test games in any fold: {values['min_test_games_per_fold']} / {values['test_games_per_fold_goal']} · Training folds with both outcomes: {values['training_folds_with_both_outcomes']} / {values['total_training_folds']}")
+        if not movement:
+            st.caption(f"Event dates: {values['event_dates']} / {values['event_date_goal']}")
+        if state[label.lower()]["failures"]:
+            messages = readable_failures(state[label.lower()]["failures"])
+            if movement:
+                messages = messages.replace("Not enough settled games", "Not enough movement-qualified settled games").replace("Not enough win/loss rows", "Not enough movement-qualified win/loss rows")
+            st.caption(messages)
+    selected_coverage = operational["by_horizon"][horizon]
+    st.subheader("Why matured landmarks are missed")
+    categories = (("Usable landmark", "usable_landmark"), ("Too stale", "too_stale"), ("Appeared after decision time", "appeared_after_decision_time"), ("No valid paired state", "no_valid_paired_state"), ("Paired state in window but no usable quote", "paired_state_in_window_but_no_usable_quote"))
+    matured = selected_coverage["matured"]
+    st.dataframe(pd.DataFrame([{"Category": label, "Count": selected_coverage[key], "% of matured": "N/A" if not matured else f"{selected_coverage[key] / matured:.0%}"} for label, key in categories]), use_container_width=True, hide_index=True)
+    st.subheader("Capture timing diagnostics")
+    timing = selected_coverage
+    st.caption(f"Too stale — count: {timing['stale_timing']['count']} · p50: {display_value(timing['stale_timing']['p50'])} minutes · p75: {display_value(timing['stale_timing']['p75'])} minutes · p90: {display_value(timing['stale_timing']['p90'])} minutes")
+    st.caption(f"Appeared after decision time — count: {timing['late_timing']['count']} · p50: {display_value(timing['late_timing']['p50'])} minutes · p75: {display_value(timing['late_timing']['p75'])} minutes · p90: {display_value(timing['late_timing']['p90'])} minutes")
     st.subheader("Recent settled landmark observations")
     recent = market_state_recent_rows(data["by_horizon"][horizon])
     if recent.empty: st.info("No settled landmark observations are available for this history scope.")
     else: st.dataframe(recent, use_container_width=True, hide_index=True)
+    st.subheader("Recent capture trend")
+    trend_rows = []
+    for date, trend in data["operational_breakdowns"]["by_event_date"].items():
+        row = {"Event date": date}
+        for name in ("T-6h", "T-3h", "T-1h"):
+            counts = trend["by_horizon"][name]
+            row[name] = "N/A" if not counts["matured"] else f"{counts['usable_landmark']} / {counts['matured']} ({_capture_rate(counts['capture_rate'])})"
+        trend_rows.append(row)
+    st.dataframe(pd.DataFrame(trend_rows), use_container_width=True, hide_index=True)
+    with st.expander("Collection details", expanded=False):
+        st.caption(f"Latest stored observation: {operational['as_of'] or 'N/A'}")
+        with st.container(horizontal=True, wrap=True, gap="small"):
+            for label, value in (("Stored observations", data["summary"]["stored_observations"]), ("Unique games observed", data["summary"]["unique_games"]), ("Unique game-markets observed", data["summary"]["unique_game_markets"]), ("Valid paired market states", data["summary"]["valid_states"]), ("Recorded game results", data["summary"]["recorded_results"]), ("Non-OK paired states retained", data["summary"]["non_ok_retained"])):
+                st.metric(label, value, width="content")
+    with st.expander("Coverage by market", expanded=False):
+        rows = []
+        for market, breakdown in data["operational_breakdowns"]["by_market"].items():
+            for name in ("T-6h", "T-3h", "T-1h"):
+                counts = breakdown["by_horizon"][name]
+                rows.append({"Market": market, "Decision time": name, "Decision time reached": counts["matured"], "Usable": counts["usable_landmark"], "Capture rate": _capture_rate(counts["capture_rate"])})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    if scope == "All sports":
+        with st.expander("Coverage by sport", expanded=False):
+            rows = []
+            for sport, breakdown in data["operational_breakdowns"]["by_sport"].items():
+                row = {"Sport": sport, "Observed game-markets": breakdown["observed_game_markets"], "Recorded results": breakdown["recorded_results"]}
+                for name in ("T-6h", "T-3h", "T-1h"):
+                    row[name] = _capture_rate(breakdown["coverage"]["by_horizon"][name]["capture_rate"])
+                rows.append(row)
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     with st.expander("Methodology", expanded=False):
-        st.markdown("""Repeated snapshots are paired into market states. Away is the fixed reference for Moneyline and Spread; Over is the fixed reference for Totals. T-6h, T-3h, and T-1h are separate, backward-looking decision times. Quote availability is separate from split-state validity, and 60-minute movement uses earlier paired history. These reference observations are not betting recommendations. Models run only through the manual benchmark after readiness requirements are met. Market probabilities are one-sided implied probabilities, not no-vig; captured pregame close is not an official sportsbook close.""")
+        st.markdown("""Repeated snapshots are paired into market states. Away is the fixed reference for Moneyline and Spread; Over is the fixed reference for Totals. T-6h, T-3h, and T-1h are separate, backward-looking decision times. Quote availability is separate from split-state validity, and 60-minute movement uses earlier paired history. These reference observations are not betting recommendations. Models run only through the manual benchmark after readiness requirements are met. Current stored market probabilities are one-sided implied probabilities; same-book paired-price provenance is not yet available. Captured pregame close is not an official sportsbook close.""")
 
 
 def render_history() -> None:
