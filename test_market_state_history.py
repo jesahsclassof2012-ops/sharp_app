@@ -206,7 +206,7 @@ def test_gate_progress_uses_exact_gate_cohort_and_shared_thresholds():
 def test_gate_progress_exposes_smallest_test_fold_and_training_class_progress():
     train_both = [{"game_key": "a", "binary_target": 0}, {"game_key": "b", "binary_target": 1}]
     train_one_class = [{"game_key": "c", "binary_target": 1}]
-    gate = {"passed": False, "cohort": [], "folds": [(train_both, [{"game_key": "t1"}, {"game_key": "t2"}]), (train_both, [{"game_key": "t3"}]), (train_one_class, [{"game_key": "t4"}, {"game_key": "t5"}, {"game_key": "t6"}])]} 
+    gate = {"passed": False, "cohort": [], "folds": [(train_both, [{"game_key": "t1"}, {"game_key": "t2"}]), (train_both, [{"game_key": "t3"}]), (train_one_class, [{"game_key": "t4"}, {"game_key": "t5"}, {"game_key": "t6"}])]}
     progress = gate_progress(gate)
     assert (progress["folds_formed"], progress["fold_goal"], progress["min_test_games_per_fold"], progress["test_games_per_fold_goal"]) == (3, 3, 1, 20)
     assert (progress["training_folds_with_both_outcomes"], progress["total_training_folds"]) == (2, 3)
