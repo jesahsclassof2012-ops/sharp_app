@@ -197,6 +197,32 @@ def test_market_movement_uses_prior_paired_state_without_quote_or_signal_identit
     assert next(iter(direction_reversal_audit(states).values()))["raw_flip_count"] == 1
 
 
+def test_indexed_landmark_movement_matches_public_lookup_at_candidate_boundaries(monkeypatch):
+    early_tie = paired_state(observed="2026-01-02T15:40:00Z", gap=8)
+    exact_prior = paired_state(observed="2026-01-02T16:00:00Z", gap=10)
+    late_boundary = paired_state(observed="2026-01-02T16:20:00Z", gap=12)
+    outside = paired_state(observed="2026-01-02T15:39:00Z", gap=4)
+    current_pair = paired_state(observed="2026-01-02T17:00:00Z", gap=20)
+    future = paired_state(observed="2026-01-02T17:01:00Z", gap=-5)
+    other_market = paired_state(market="Total", observed="2026-01-02T16:00:00Z", gap=-15)
+    other_game = [dict(row, game_key="other-game", signal_key=f"other-{row['signal_key']}") for row in paired_state(observed="2026-01-02T16:00:00Z", gap=-18)]
+    states, _ = build_market_states([*early_tie, *exact_prior, *late_boundary, *outside, *current_pair, *future, *other_market, *other_game])
+    current = next(state for state in states if state["market"] == "Spread" and state["observed_at_utc"] == "2026-01-02T17:00:00Z")
+    expected = market_state_movement(current, states)
+    assert expected == 10  # Exact 16:00 observation beats both tolerance boundaries.
+    series = [state for state in states if state["game_key"] == current["game_key"] and state["market"] == current["market"]]
+    assert signal_model_benchmark._market_state_movement_from_series(current, series) == expected
+    tied_states = [state for state in states if state["observed_at_utc"] != "2026-01-02T16:00:00Z" or state["market"] != "Spread"]
+    assert market_state_movement(current, tied_states) == 12  # Equal distances resolve toward 15:40.
+    first = next(state for state in states if state["market"] == "Spread" and state["observed_at_utc"] == "2026-01-02T15:39:00Z")
+    assert market_state_movement(first, states) is None
+
+    monkeypatch.setattr(signal_model_benchmark, "market_state_movement", lambda *_: (_ for _ in ()).throw(AssertionError("full scan")))
+    rows, _ = landmark_decision_rows(states, [{"game_key": current["game_key"], "away_score": 24, "home_score": 20}])
+    t3 = next(row for row in rows if row["landmark_horizon_minutes"] == 180)
+    assert t3["movement_60m"] == expected
+
+
 def test_canonical_landmark_settlement_and_separate_horizons():
     early = paired_state(observed="2026-01-02T14:00:00Z", market="Spread")
     later = paired_state(observed="2026-01-02T17:00:00Z", market="Spread")

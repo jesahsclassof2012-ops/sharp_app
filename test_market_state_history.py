@@ -1,7 +1,7 @@
 from analysis.research_readiness import MAIN_GATES, MOVEMENT_GATES, sufficiency_gate
 from analysis import readonly_history_benchmark as benchmark
-from market_state_history import SNAPSHOTS_SQL, RESULTS_SQL, gate_progress, operational_landmark_coverage, summarize_market_state_history
-from analysis.signal_model_benchmark import build_market_states
+from market_state_history import SNAPSHOTS_SQL, RESULTS_SQL, gate_progress, operational_capture_breakdowns, operational_landmark_coverage, summarize_market_state_history
+from analysis.signal_model_benchmark import CANONICAL_SIDES, build_market_states
 import streamlit_app as app
 from contextlib import nullcontext
 
@@ -210,6 +210,34 @@ def test_capture_trend_limits_to_latest_seven_matured_event_dates():
     data = summarize_market_state_history(snapshots, [])
     trend = data["operational_breakdowns"]["by_event_date"]
     assert len(trend) == 7 and "2026-01-01" not in trend and "2026-01-08" in trend
+
+
+def test_grouped_operational_breakdowns_match_the_original_filtering_semantics():
+    nfl_spread = pair("2026-01-02T18:40:00Z", "NFL")
+    nfl_total = [dict(row, market="Total", selection=selection, selection_side=side, best_line=line, signal_key=f"total-{row['signal_key']}") for row, selection, side, line in zip(pair("2026-01-02T18:40:00Z", "NFL"), ("Over", "Under"), ("over", "under"), ("o45.5", "u45.5"))]
+    mlb = [dict(row, game_key="mlb-game", signal_key=f"mlb-{row['signal_key']}", sport="MLB", event_start_utc="2026-01-03T20:00:00Z", observed_at_utc="2026-01-03T19:10:00Z") for row in pair("2026-01-03T19:10:00Z", "MLB")]
+    snapshots = [*nfl_spread, *nfl_total, *mlb]
+    states, _ = build_market_states(snapshots)
+    results = [{"game_key": nfl_spread[0]["game_key"], "sport": "NFL"}, {"game_key": "mlb-game", "sport": "MLB"}]
+    as_of = "2026-01-03T19:10:00Z"
+
+    def reference():
+        compact = lambda rows, paired: operational_landmark_coverage(rows, paired, as_of)
+        markets = {market: compact([row for row in snapshots if row.get("market") == market], [row for row in states if row.get("market") == market]) for market in CANONICAL_SIDES}
+        sports = {}
+        for sport in sorted({str(row.get("sport")) for row in snapshots if row.get("sport")}):
+            scoped = [row for row in snapshots if row.get("sport") == sport]
+            sports[sport] = {"coverage": operational_landmark_coverage(scoped, [row for row in states if row.get("sport") == sport]), "observed_game_markets": len({(row["game_key"], row["market"]) for row in scoped if row.get("market") in CANONICAL_SIDES}), "recorded_results": len({row.get("game_key") for row in results if row.get("sport") == sport})}
+        dates = sorted({row["event_start_utc"][:10] for row in snapshots}, reverse=True)
+        trend = {}
+        for date in dates:
+            scoped = [row for row in snapshots if row["event_start_utc"][:10] == date]
+            coverage = compact(scoped, [row for row in states if row["event_start_utc"][:10] == date])
+            if any(values["matured"] for values in coverage["by_horizon"].values()): trend[date] = coverage
+            if len(trend) == 7: break
+        return {"by_market": markets, "by_sport": sports, "by_event_date": trend}
+
+    assert operational_capture_breakdowns(snapshots, states, results, as_of) == reference()
 
 
 def test_gate_progress_uses_exact_gate_cohort_and_shared_thresholds():

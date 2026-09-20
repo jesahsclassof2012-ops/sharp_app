@@ -114,16 +114,40 @@ def operational_capture_breakdowns(snapshots: list[dict[str, Any]], states: list
     """Aggregate event-date, market, and per-sport operational coverage."""
     def compact(rows: list[dict[str, Any]], paired: list[dict[str, Any]]) -> dict[str, Any]:
         return operational_landmark_coverage(rows, paired, as_of)
-    markets = {market: compact([row for row in snapshots if row.get("market") == market], [row for row in states if row.get("market") == market]) for market in CANONICAL_SIDES}
+    snapshots_by_market = {market: [] for market in CANONICAL_SIDES}
+    states_by_market = {market: [] for market in CANONICAL_SIDES}
+    snapshots_by_sport: dict[str, list[dict[str, Any]]] = {}
+    states_by_sport: dict[str, list[dict[str, Any]]] = {}
+    results_by_sport: dict[str, set[Any]] = {}
+    snapshots_by_date: dict[str, list[dict[str, Any]]] = {}
+    states_by_date: dict[str, list[dict[str, Any]]] = {}
+    for row in snapshots:
+        market = row.get("market")
+        if market in snapshots_by_market:
+            snapshots_by_market[market].append(row)
+        if row.get("sport"):
+            snapshots_by_sport.setdefault(str(row["sport"]), []).append(row)
+        if (event_start := _timestamp(row.get("event_start_utc"))):
+            snapshots_by_date.setdefault(event_start.date().isoformat(), []).append(row)
+    for row in states:
+        market = row.get("market")
+        if market in states_by_market:
+            states_by_market[market].append(row)
+        if row.get("sport"):
+            states_by_sport.setdefault(str(row["sport"]), []).append(row)
+        if (event_start := _timestamp(row.get("event_start_utc"))):
+            states_by_date.setdefault(event_start.date().isoformat(), []).append(row)
+    for row in results:
+        if row.get("sport"):
+            results_by_sport.setdefault(str(row["sport"]), set()).add(row.get("game_key"))
+    markets = {market: compact(snapshots_by_market[market], states_by_market[market]) for market in CANONICAL_SIDES}
     sports = {}
-    for sport in sorted({str(row.get("sport")) for row in snapshots if row.get("sport")}):
-        scoped_rows = [row for row in snapshots if row.get("sport") == sport]
-        sports[sport] = {"coverage": operational_landmark_coverage(scoped_rows, [row for row in states if row.get("sport") == sport]), "observed_game_markets": len(_supported_groups(scoped_rows)), "recorded_results": len({row.get("game_key") for row in results if row.get("sport") == sport})}
-    dates = sorted({moment.date().isoformat() for row in snapshots if (moment := _timestamp(row.get("event_start_utc")))}, reverse=True)
+    for sport in sorted(snapshots_by_sport):
+        scoped_rows = snapshots_by_sport[sport]
+        sports[sport] = {"coverage": operational_landmark_coverage(scoped_rows, states_by_sport.get(sport, [])), "observed_game_markets": len(_supported_groups(scoped_rows)), "recorded_results": len(results_by_sport.get(sport, set()))}
     trend = {}
-    for date in dates:
-        scoped_rows = [row for row in snapshots if (moment := _timestamp(row.get("event_start_utc"))) and moment.date().isoformat() == date]
-        coverage = compact(scoped_rows, [row for row in states if (moment := _timestamp(row.get("event_start_utc"))) and moment.date().isoformat() == date])
+    for date in sorted(snapshots_by_date, reverse=True):
+        coverage = compact(snapshots_by_date[date], states_by_date.get(date, []))
         if any(values["matured"] for values in coverage["by_horizon"].values()):
             trend[date] = coverage
         if len(trend) == 7:
