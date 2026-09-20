@@ -596,13 +596,11 @@ def landmark_coverage_audit(raw_snapshots: Iterable[dict[str, Any]], states: Ite
     return output
 
 
-def market_state_movement(current: dict[str, Any], states: Iterable[dict[str, Any]]) -> float | None:
-    """Use prior paired market states, never signal-key history or future data."""
+def _market_state_movement_from_series(current: dict[str, Any], series: Iterable[dict[str, Any]]) -> float | None:
+    """Calculate movement from one already-matched game-market series."""
     decision = _time(current["observed_at_utc"]); target = decision.timestamp() - MOVEMENT_MINUTES * 60
     candidates = []
-    for state in states:
-        if state.get("game_key") != current.get("game_key") or state.get("market") != current.get("market"):
-            continue
+    for state in series:
         observed = _time(state["observed_at_utc"])
         if observed >= decision or observed >= _time(state["event_start_utc"]):
             continue
@@ -615,9 +613,16 @@ def market_state_movement(current: dict[str, Any], states: Iterable[dict[str, An
     return float(current["signed_gap"]) - float(prior["signed_gap"])
 
 
+def market_state_movement(current: dict[str, Any], states: Iterable[dict[str, Any]]) -> float | None:
+    """Use prior paired market states, never signal-key history or future data."""
+    series = [state for state in states if state.get("game_key") == current.get("game_key") and state.get("market") == current.get("market")]
+    return _market_state_movement_from_series(current, series)
+
+
 def landmark_decision_rows(states: Iterable[dict[str, Any]], results: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]]]:
     """Settle the canonical away/over target at each fixed landmark."""
     state_list = list(states); selected, coverage = select_landmark_states(state_list)
+    state_series = _grouped(state_list, lambda value: (value["game_key"], value["market"]))
     scores = {row.get("game_key"): row for row in results}; output = []
     for state in selected:
         result = scores.get(state["game_key"])
@@ -636,7 +641,7 @@ def landmark_decision_rows(states: Iterable[dict[str, Any]], results: Iterable[d
             "bets_pct": state["canonical_bets_pct"], "money_pct": state["canonical_money_pct"], "minutes_to_start": minutes,
             "outcome": outcome, "binary_target": 1 if outcome == "win" else 0 if outcome == "loss" else None,
             "market_probability": implied_probability(row.get("best_price")), "market_probability_type": "one_sided_implied",
-            "movement_60m": market_state_movement(state, state_list),
+            "movement_60m": _market_state_movement_from_series(state, state_series[(state["game_key"], state["market"])]),
             "raw_canonical_signal_key": row.get("signal_key"),
             "research_row_key": f"{state['game_key']}|{state['market']}|T-{state['landmark_horizon_minutes']}",
         })
