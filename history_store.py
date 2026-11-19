@@ -161,9 +161,7 @@ class HistoryStore:
     def initialize(self) -> None:
         ident = "BIGSERIAL PRIMARY KEY" if self.is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
         self.execute(f"CREATE TABLE IF NOT EXISTS snapshots (id {ident}, game_key TEXT NOT NULL, signal_key TEXT NOT NULL, observed_at_utc TEXT NOT NULL, sport TEXT NOT NULL, matchup TEXT NOT NULL, event_start_utc TEXT NOT NULL, market TEXT NOT NULL, selection TEXT NOT NULL, selection_side TEXT, split_line TEXT, bets_pct REAL, money_pct REAL, money_minus_bets_gap REAL, best_line TEXT, best_price INTEGER, break_even_pct REAL, data_quality TEXT, line_vs_split TEXT, UNIQUE(signal_key,observed_at_utc))")
-        # The live board reads bounded historical windows for many exact signals
-        # at once.  This remains safe to run on existing SQLite/PostgreSQL data.
-        self.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_signal_observed ON snapshots(signal_key, observed_at_utc)")
+        # UNIQUE(signal_key, observed_at_utc) also indexes the live movement lookup.
         self.execute(f"CREATE TABLE IF NOT EXISTS results (id {ident}, game_key TEXT NOT NULL UNIQUE, sport TEXT NOT NULL, matchup TEXT NOT NULL, event_start_utc TEXT NOT NULL, away_score INTEGER NOT NULL, home_score INTEGER NOT NULL, settled_at_utc TEXT NOT NULL)")
         self.ensure_result_provenance_columns()
         self.connection.commit()
