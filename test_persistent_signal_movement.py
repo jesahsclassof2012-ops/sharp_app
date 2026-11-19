@@ -65,8 +65,12 @@ def enriched(monkeypatch, store, rows):
 def test_snapshot_signal_time_index_is_idempotent():
     store = HistoryStore("sqlite:///:memory:")
     store.initialize()
-    indexes = {row["name"] for row in store.rows(store.execute("PRAGMA index_list(snapshots)"))}
-    assert "idx_snapshots_signal_observed" in indexes
+    matching = []
+    for index in store.rows(store.execute("PRAGMA index_list(snapshots)")):
+        columns = store.rows(store.execute("SELECT name FROM pragma_index_info(?) ORDER BY seqno", (index["name"],)))
+        if [row["name"] for row in columns] == ["signal_key", "observed_at_utc"]:
+            matching.append(index["unique"])
+    assert matching == [1]
 
 
 def test_batched_movement_query_and_first_seen_are_exact_signal_and_bounded():
